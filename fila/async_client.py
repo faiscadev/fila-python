@@ -24,7 +24,7 @@ class AsyncClient:
 
         client = AsyncClient("localhost:5555")
         msg_id = await client.enqueue("my-queue", {"tenant": "acme"}, b"hello")
-        async for msg in client.consume("my-queue"):
+        async for msg in await client.consume("my-queue"):
             await client.ack("my-queue", msg.id)
         await client.close()
 
