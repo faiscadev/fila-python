@@ -26,6 +26,20 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
-      # Integration tests require a fila-server binary.
-      # They are skipped if the binary is not found.
+      - uses: actions/checkout@v4
+        with:
+          repository: faiscadev/fila
+          path: fila
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            fila/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: fila-server-${{ runner.os }}-${{ hashFiles('fila/Cargo.lock') }}
+          restore-keys: fila-server-${{ runner.os }}-
+      - run: cargo build --release -p fila-server --manifest-path fila/Cargo.toml
       - run: python -m pytest tests/ -v
+        env:
+          FILA_SERVER_BIN: ${{ github.workspace }}/fila/target/release/fila-server
