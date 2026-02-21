@@ -1,0 +1,30 @@
+name: Dev Publish to TestPyPI
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  dev-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Generate dev version
+        run: |
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DEV_VERSION="0.1.dev${COMMIT_COUNT}+g${SHORT_SHA}"
+          sed -i "s/^version = .*/version = \"${DEV_VERSION}\"/" pyproject.toml
+          echo "Publishing version: ${DEV_VERSION}"
+      - run: pip install build
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
