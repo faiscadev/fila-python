@@ -10,13 +10,13 @@ readme = "README.md"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.10"
 dependencies = [
-    "grpcio>=1.60.0",
+    "grpcio>=1.78.1",
     "protobuf>=4.25.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "grpcio-tools>=1.60.0",
+    "grpcio-tools>=1.78.1",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.3",
