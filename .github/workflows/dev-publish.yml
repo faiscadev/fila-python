@@ -20,7 +20,7 @@ jobs:
         run: |
           COMMIT_COUNT=$(git rev-list --count HEAD)
           SHORT_SHA=$(git rev-parse --short HEAD)
-          DEV_VERSION="0.1.dev${COMMIT_COUNT}+g${SHORT_SHA}"
+          DEV_VERSION="0.1.dev${COMMIT_COUNT}"
           sed -i "s/^version = .*/version = \"${DEV_VERSION}\"/" pyproject.toml
           echo "Publishing version: ${DEV_VERSION}"
       - run: pip install build
