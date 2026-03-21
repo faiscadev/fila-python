@@ -75,6 +75,31 @@ class FilaAdminStub(object):
                 request_serializer=fila_dot_v1_dot_admin__pb2.ListQueuesRequest.SerializeToString,
                 response_deserializer=fila_dot_v1_dot_admin__pb2.ListQueuesResponse.FromString,
                 _registered_method=True)
+        self.CreateApiKey = channel.unary_unary(
+                '/fila.v1.FilaAdmin/CreateApiKey',
+                request_serializer=fila_dot_v1_dot_admin__pb2.CreateApiKeyRequest.SerializeToString,
+                response_deserializer=fila_dot_v1_dot_admin__pb2.CreateApiKeyResponse.FromString,
+                _registered_method=True)
+        self.RevokeApiKey = channel.unary_unary(
+                '/fila.v1.FilaAdmin/RevokeApiKey',
+                request_serializer=fila_dot_v1_dot_admin__pb2.RevokeApiKeyRequest.SerializeToString,
+                response_deserializer=fila_dot_v1_dot_admin__pb2.RevokeApiKeyResponse.FromString,
+                _registered_method=True)
+        self.ListApiKeys = channel.unary_unary(
+                '/fila.v1.FilaAdmin/ListApiKeys',
+                request_serializer=fila_dot_v1_dot_admin__pb2.ListApiKeysRequest.SerializeToString,
+                response_deserializer=fila_dot_v1_dot_admin__pb2.ListApiKeysResponse.FromString,
+                _registered_method=True)
+        self.SetAcl = channel.unary_unary(
+                '/fila.v1.FilaAdmin/SetAcl',
+                request_serializer=fila_dot_v1_dot_admin__pb2.SetAclRequest.SerializeToString,
+                response_deserializer=fila_dot_v1_dot_admin__pb2.SetAclResponse.FromString,
+                _registered_method=True)
+        self.GetAcl = channel.unary_unary(
+                '/fila.v1.FilaAdmin/GetAcl',
+                request_serializer=fila_dot_v1_dot_admin__pb2.GetAclRequest.SerializeToString,
+                response_deserializer=fila_dot_v1_dot_admin__pb2.GetAclResponse.FromString,
+                _registered_method=True)
 
 
 class FilaAdminServicer(object):
@@ -129,6 +154,38 @@ class FilaAdminServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CreateApiKey(self, request, context):
+        """API key management. CreateApiKey bypasses auth (bootstrap); others require a valid key.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RevokeApiKey(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListApiKeys(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetAcl(self, request, context):
+        """Per-key ACL management.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetAcl(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_FilaAdminServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -171,6 +228,31 @@ def add_FilaAdminServicer_to_server(servicer, server):
                     servicer.ListQueues,
                     request_deserializer=fila_dot_v1_dot_admin__pb2.ListQueuesRequest.FromString,
                     response_serializer=fila_dot_v1_dot_admin__pb2.ListQueuesResponse.SerializeToString,
+            ),
+            'CreateApiKey': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateApiKey,
+                    request_deserializer=fila_dot_v1_dot_admin__pb2.CreateApiKeyRequest.FromString,
+                    response_serializer=fila_dot_v1_dot_admin__pb2.CreateApiKeyResponse.SerializeToString,
+            ),
+            'RevokeApiKey': grpc.unary_unary_rpc_method_handler(
+                    servicer.RevokeApiKey,
+                    request_deserializer=fila_dot_v1_dot_admin__pb2.RevokeApiKeyRequest.FromString,
+                    response_serializer=fila_dot_v1_dot_admin__pb2.RevokeApiKeyResponse.SerializeToString,
+            ),
+            'ListApiKeys': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListApiKeys,
+                    request_deserializer=fila_dot_v1_dot_admin__pb2.ListApiKeysRequest.FromString,
+                    response_serializer=fila_dot_v1_dot_admin__pb2.ListApiKeysResponse.SerializeToString,
+            ),
+            'SetAcl': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetAcl,
+                    request_deserializer=fila_dot_v1_dot_admin__pb2.SetAclRequest.FromString,
+                    response_serializer=fila_dot_v1_dot_admin__pb2.SetAclResponse.SerializeToString,
+            ),
+            'GetAcl': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAcl,
+                    request_deserializer=fila_dot_v1_dot_admin__pb2.GetAclRequest.FromString,
+                    response_serializer=fila_dot_v1_dot_admin__pb2.GetAclResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -390,6 +472,141 @@ class FilaAdmin(object):
             '/fila.v1.FilaAdmin/ListQueues',
             fila_dot_v1_dot_admin__pb2.ListQueuesRequest.SerializeToString,
             fila_dot_v1_dot_admin__pb2.ListQueuesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateApiKey(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fila.v1.FilaAdmin/CreateApiKey',
+            fila_dot_v1_dot_admin__pb2.CreateApiKeyRequest.SerializeToString,
+            fila_dot_v1_dot_admin__pb2.CreateApiKeyResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RevokeApiKey(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fila.v1.FilaAdmin/RevokeApiKey',
+            fila_dot_v1_dot_admin__pb2.RevokeApiKeyRequest.SerializeToString,
+            fila_dot_v1_dot_admin__pb2.RevokeApiKeyResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListApiKeys(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fila.v1.FilaAdmin/ListApiKeys',
+            fila_dot_v1_dot_admin__pb2.ListApiKeysRequest.SerializeToString,
+            fila_dot_v1_dot_admin__pb2.ListApiKeysResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetAcl(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fila.v1.FilaAdmin/SetAcl',
+            fila_dot_v1_dot_admin__pb2.SetAclRequest.SerializeToString,
+            fila_dot_v1_dot_admin__pb2.SetAclResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetAcl(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fila.v1.FilaAdmin/GetAcl',
+            fila_dot_v1_dot_admin__pb2.GetAclRequest.SerializeToString,
+            fila_dot_v1_dot_admin__pb2.GetAclResponse.FromString,
             options,
             channel_credentials,
             insecure,

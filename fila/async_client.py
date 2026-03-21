@@ -15,6 +15,90 @@ from fila.types import ConsumeMessage
 from fila.v1 import service_pb2, service_pb2_grpc
 
 
+class _AsyncClientCallDetails(
+    grpc.aio.ClientCallDetails,  # type: ignore[misc]
+):
+    """Concrete ``ClientCallDetails`` for the async interceptor chain.
+
+    ``grpc.aio.ClientCallDetails`` is a namedtuple with 5 fields (method,
+    timeout, metadata, credentials, wait_for_ready).  We override ``__new__``
+    so the namedtuple layer receives exactly those five, then set any extra
+    attribute (``compression``) in ``__init__``.
+    """
+
+    def __new__(
+        cls,
+        method: str,
+        timeout: float | None,
+        metadata: grpc.aio.Metadata | None,
+        credentials: grpc.CallCredentials | None,
+        wait_for_ready: bool | None,
+    ) -> _AsyncClientCallDetails:
+        return super().__new__(cls, method, timeout, metadata, credentials, wait_for_ready)  # type: ignore[no-any-return]
+
+    def __init__(
+        self,
+        method: str,
+        timeout: float | None,
+        metadata: grpc.aio.Metadata | None,
+        credentials: grpc.CallCredentials | None,
+        wait_for_ready: bool | None,
+    ) -> None:
+        # Fields are already set by __new__ (namedtuple).  Nothing extra to do.
+        pass
+
+
+class _AsyncApiKeyInterceptor(
+    grpc.aio.UnaryUnaryClientInterceptor,  # type: ignore[misc]
+    grpc.aio.UnaryStreamClientInterceptor,  # type: ignore[misc]
+):
+    """Injects ``authorization: Bearer <key>`` metadata into every async RPC."""
+
+    def __init__(self, api_key: str) -> None:
+        self._metadata = grpc.aio.Metadata(("authorization", f"Bearer {api_key}"))
+
+    def _inject(
+        self, metadata: grpc.aio.Metadata | None
+    ) -> grpc.aio.Metadata:
+        merged = grpc.aio.Metadata()
+        if metadata is not None:
+            for key, value in metadata:
+                merged.add(key, value)
+        for key, value in self._metadata:
+            merged.add(key, value)
+        return merged
+
+    async def intercept_unary_unary(
+        self,
+        continuation: Any,
+        client_call_details: grpc.aio.ClientCallDetails,
+        request: Any,
+    ) -> Any:
+        new_details = _AsyncClientCallDetails(
+            client_call_details.method,
+            client_call_details.timeout,
+            self._inject(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+        )
+        return await continuation(new_details, request)
+
+    async def intercept_unary_stream(
+        self,
+        continuation: Any,
+        client_call_details: grpc.aio.ClientCallDetails,
+        request: Any,
+    ) -> Any:
+        new_details = _AsyncClientCallDetails(
+            client_call_details.method,
+            client_call_details.timeout,
+            self._inject(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+        )
+        return await continuation(new_details, request)
+
+
 class AsyncClient:
     """Asynchronous client for the Fila message broker.
 
@@ -32,15 +116,77 @@ class AsyncClient:
 
         async with AsyncClient("localhost:5555") as client:
             await client.enqueue("my-queue", None, b"hello")
+
+    TLS (system trust store)::
+
+        client = AsyncClient("localhost:5555", tls=True)
+
+    TLS (custom CA)::
+
+        with open("ca.pem", "rb") as f:
+            ca = f.read()
+        client = AsyncClient("localhost:5555", ca_cert=ca)
+
+    mTLS + API key::
+
+        client = AsyncClient(
+            "localhost:5555",
+            ca_cert=ca,
+            client_cert=cert,
+            client_key=key,
+            api_key="fila_...",
+        )
     """
 
-    def __init__(self, addr: str) -> None:
+    def __init__(
+        self,
+        addr: str,
+        *,
+        tls: bool = False,
+        ca_cert: bytes | None = None,
+        client_cert: bytes | None = None,
+        client_key: bytes | None = None,
+        api_key: str | None = None,
+    ) -> None:
         """Connect to a Fila broker at the given address.
 
         Args:
             addr: Broker address in "host:port" format (e.g., "localhost:5555").
+            tls: Enable TLS using the OS system trust store for server
+                 verification. Ignored when ``ca_cert`` is provided (which
+                 implies TLS). Defaults to ``False``.
+            ca_cert: PEM-encoded CA certificate for verifying the server.
+                     When provided, a TLS channel is used instead of an insecure one.
+            client_cert: PEM-encoded client certificate for mutual TLS (optional).
+            client_key: PEM-encoded client private key for mutual TLS (optional).
+            api_key: API key for authentication. When set, every RPC includes an
+                     ``authorization: Bearer <key>`` metadata header.
         """
-        self._channel = grpc.aio.insecure_channel(addr)
+        use_tls = tls or ca_cert is not None
+
+        if (client_cert is not None or client_key is not None) and not use_tls:
+            raise ValueError(
+                "client_cert and client_key require ca_cert or tls=True to establish a TLS channel"
+            )
+
+        interceptors: list[grpc.aio.ClientInterceptor] = []
+        if api_key is not None:
+            interceptors.append(_AsyncApiKeyInterceptor(api_key))
+
+        if use_tls:
+            creds = grpc.ssl_channel_credentials(
+                root_certificates=ca_cert,
+                private_key=client_key,
+                certificate_chain=client_cert,
+            )
+            self._channel = grpc.aio.secure_channel(
+                addr, creds, interceptors=interceptors or None
+            )
+        else:
+            self._channel = grpc.aio.insecure_channel(
+                addr, interceptors=interceptors or None
+            )
+
         self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
 
     async def close(self) -> None:
