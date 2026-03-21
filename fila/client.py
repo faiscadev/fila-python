@@ -14,9 +14,35 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
+class _ClientCallDetails(
+    grpc.ClientCallDetails,  # type: ignore[misc]
+):
+    """Concrete ``ClientCallDetails`` that can be instantiated.
+
+    ``grpc.ClientCallDetails`` is an abstract class with no ``__init__``, so we
+    need our own subclass to carry the fields through the interceptor chain.
+    """
+
+    def __init__(
+        self,
+        method: str,
+        timeout: float | None,
+        metadata: list[tuple[str, str | bytes]] | None,
+        credentials: grpc.CallCredentials | None,
+        wait_for_ready: bool | None,
+        compression: grpc.Compression | None,
+    ) -> None:
+        self.method = method
+        self.timeout = timeout
+        self.metadata = metadata
+        self.credentials = credentials
+        self.wait_for_ready = wait_for_ready
+        self.compression = compression
+
+
 class _ApiKeyInterceptor(
-    grpc.UnaryUnaryClientInterceptor,
-    grpc.UnaryStreamClientInterceptor,
+    grpc.UnaryUnaryClientInterceptor,  # type: ignore[misc]
+    grpc.UnaryStreamClientInterceptor,  # type: ignore[misc]
 ):
     """Injects ``authorization: Bearer <key>`` metadata into every RPC."""
 
@@ -25,10 +51,10 @@ class _ApiKeyInterceptor(
 
     def _inject(
         self, client_call_details: grpc.ClientCallDetails
-    ) -> grpc.ClientCallDetails:
+    ) -> _ClientCallDetails:
         metadata = list(client_call_details.metadata or [])
         metadata.extend(self._metadata)
-        return grpc.ClientCallDetails(  # type: ignore[call-arg]
+        return _ClientCallDetails(
             client_call_details.method,
             client_call_details.timeout,
             metadata,
@@ -109,6 +135,11 @@ class Client:
             api_key: API key for authentication. When set, every RPC includes an
                      ``authorization: Bearer <key>`` metadata header.
         """
+        if (client_cert is not None or client_key is not None) and ca_cert is None:
+            raise ValueError(
+                "client_cert and client_key require ca_cert to establish a TLS channel"
+            )
+
         if ca_cert is not None:
             creds = grpc.ssl_channel_credentials(
                 root_certificates=ca_cert,

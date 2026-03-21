@@ -15,9 +15,35 @@ from fila.types import ConsumeMessage
 from fila.v1 import service_pb2, service_pb2_grpc
 
 
+class _AsyncClientCallDetails(
+    grpc.aio.ClientCallDetails,  # type: ignore[misc]
+):
+    """Concrete ``ClientCallDetails`` for the async interceptor chain.
+
+    ``grpc.aio.ClientCallDetails`` is abstract and cannot be instantiated
+    directly, so we need our own subclass.
+    """
+
+    def __init__(
+        self,
+        method: str,
+        timeout: float | None,
+        metadata: grpc.aio.Metadata | None,
+        credentials: grpc.CallCredentials | None,
+        wait_for_ready: bool | None,
+        compression: grpc.Compression | None,
+    ) -> None:
+        self.method = method
+        self.timeout = timeout
+        self.metadata = metadata
+        self.credentials = credentials
+        self.wait_for_ready = wait_for_ready
+        self.compression = compression
+
+
 class _AsyncApiKeyInterceptor(
-    grpc.aio.UnaryUnaryClientInterceptor,
-    grpc.aio.UnaryStreamClientInterceptor,
+    grpc.aio.UnaryUnaryClientInterceptor,  # type: ignore[misc]
+    grpc.aio.UnaryStreamClientInterceptor,  # type: ignore[misc]
 ):
     """Injects ``authorization: Bearer <key>`` metadata into every async RPC."""
 
@@ -41,12 +67,13 @@ class _AsyncApiKeyInterceptor(
         client_call_details: grpc.aio.ClientCallDetails,
         request: Any,
     ) -> Any:
-        new_details = grpc.aio.ClientCallDetails(  # type: ignore[call-arg]
+        new_details = _AsyncClientCallDetails(
             client_call_details.method,
             client_call_details.timeout,
             self._inject(client_call_details.metadata),
             client_call_details.credentials,
             client_call_details.wait_for_ready,
+            client_call_details.compression,
         )
         return await continuation(new_details, request)
 
@@ -56,12 +83,13 @@ class _AsyncApiKeyInterceptor(
         client_call_details: grpc.aio.ClientCallDetails,
         request: Any,
     ) -> Any:
-        new_details = grpc.aio.ClientCallDetails(  # type: ignore[call-arg]
+        new_details = _AsyncClientCallDetails(
             client_call_details.method,
             client_call_details.timeout,
             self._inject(client_call_details.metadata),
             client_call_details.credentials,
             client_call_details.wait_for_ready,
+            client_call_details.compression,
         )
         return await continuation(new_details, request)
 
@@ -121,6 +149,11 @@ class AsyncClient:
             api_key: API key for authentication. When set, every RPC includes an
                      ``authorization: Bearer <key>`` metadata header.
         """
+        if (client_cert is not None or client_key is not None) and ca_cert is None:
+            raise ValueError(
+                "client_cert and client_key require ca_cert to establish a TLS channel"
+            )
+
         interceptors: list[grpc.aio.ClientInterceptor] = []
         if api_key is not None:
             interceptors.append(_AsyncApiKeyInterceptor(api_key))

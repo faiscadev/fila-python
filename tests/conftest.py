@@ -236,13 +236,14 @@ def server() -> Generator[TestServer, None, None]:
     # Wait for server to be ready.
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
+        channel = grpc.insecure_channel(addr)
         try:
-            channel = grpc.insecure_channel(addr)
             stub = admin_pb2_grpc.FilaAdminStub(channel)
             stub.ListQueues(admin_pb2.ListQueuesRequest())
             channel.close()
             break
         except grpc.RpcError:
+            channel.close()
             time.sleep(0.05)
     else:
         ts.stop()
@@ -297,13 +298,14 @@ def tls_server() -> Generator[TestServer, None, None]:
     # Wait for server to be ready (use TLS channel).
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
+        channel = ts._make_channel()
         try:
-            channel = ts._make_channel()
             stub = admin_pb2_grpc.FilaAdminStub(channel)
             stub.ListQueues(admin_pb2.ListQueuesRequest())
             channel.close()
             break
         except grpc.RpcError:
+            channel.close()
             time.sleep(0.05)
     else:
         ts.stop()
@@ -349,13 +351,14 @@ def auth_server() -> Generator[TestServer, None, None]:
     # Wait for server to be ready.
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
+        channel = ts._make_channel()
         try:
-            channel = ts._make_channel()
             stub = admin_pb2_grpc.FilaAdminStub(channel)
             stub.ListQueues(admin_pb2.ListQueuesRequest())
             channel.close()
             break
         except grpc.RpcError:
+            channel.close()
             time.sleep(0.05)
     else:
         ts.stop()
