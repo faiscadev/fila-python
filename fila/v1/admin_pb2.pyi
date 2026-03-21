@@ -117,7 +117,7 @@ class PerThrottleKeyStats(_message.Message):
     def __init__(self, key: _Optional[str] = ..., tokens: _Optional[float] = ..., rate_per_second: _Optional[float] = ..., burst: _Optional[float] = ...) -> None: ...
 
 class GetStatsResponse(_message.Message):
-    __slots__ = ("depth", "in_flight", "active_fairness_keys", "active_consumers", "quantum", "per_key_stats", "per_throttle_stats")
+    __slots__ = ("depth", "in_flight", "active_fairness_keys", "active_consumers", "quantum", "per_key_stats", "per_throttle_stats", "leader_node_id", "replication_count")
     DEPTH_FIELD_NUMBER: _ClassVar[int]
     IN_FLIGHT_FIELD_NUMBER: _ClassVar[int]
     ACTIVE_FAIRNESS_KEYS_FIELD_NUMBER: _ClassVar[int]
@@ -125,6 +125,8 @@ class GetStatsResponse(_message.Message):
     QUANTUM_FIELD_NUMBER: _ClassVar[int]
     PER_KEY_STATS_FIELD_NUMBER: _ClassVar[int]
     PER_THROTTLE_STATS_FIELD_NUMBER: _ClassVar[int]
+    LEADER_NODE_ID_FIELD_NUMBER: _ClassVar[int]
+    REPLICATION_COUNT_FIELD_NUMBER: _ClassVar[int]
     depth: int
     in_flight: int
     active_fairness_keys: int
@@ -132,7 +134,9 @@ class GetStatsResponse(_message.Message):
     quantum: int
     per_key_stats: _containers.RepeatedCompositeFieldContainer[PerFairnessKeyStats]
     per_throttle_stats: _containers.RepeatedCompositeFieldContainer[PerThrottleKeyStats]
-    def __init__(self, depth: _Optional[int] = ..., in_flight: _Optional[int] = ..., active_fairness_keys: _Optional[int] = ..., active_consumers: _Optional[int] = ..., quantum: _Optional[int] = ..., per_key_stats: _Optional[_Iterable[_Union[PerFairnessKeyStats, _Mapping]]] = ..., per_throttle_stats: _Optional[_Iterable[_Union[PerThrottleKeyStats, _Mapping]]] = ...) -> None: ...
+    leader_node_id: int
+    replication_count: int
+    def __init__(self, depth: _Optional[int] = ..., in_flight: _Optional[int] = ..., active_fairness_keys: _Optional[int] = ..., active_consumers: _Optional[int] = ..., quantum: _Optional[int] = ..., per_key_stats: _Optional[_Iterable[_Union[PerFairnessKeyStats, _Mapping]]] = ..., per_throttle_stats: _Optional[_Iterable[_Union[PerThrottleKeyStats, _Mapping]]] = ..., leader_node_id: _Optional[int] = ..., replication_count: _Optional[int] = ...) -> None: ...
 
 class RedriveRequest(_message.Message):
     __slots__ = ("dlq_queue", "count")
@@ -153,19 +157,113 @@ class ListQueuesRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class QueueInfo(_message.Message):
-    __slots__ = ("name", "depth", "in_flight", "active_consumers")
+    __slots__ = ("name", "depth", "in_flight", "active_consumers", "leader_node_id")
     NAME_FIELD_NUMBER: _ClassVar[int]
     DEPTH_FIELD_NUMBER: _ClassVar[int]
     IN_FLIGHT_FIELD_NUMBER: _ClassVar[int]
     ACTIVE_CONSUMERS_FIELD_NUMBER: _ClassVar[int]
+    LEADER_NODE_ID_FIELD_NUMBER: _ClassVar[int]
     name: str
     depth: int
     in_flight: int
     active_consumers: int
-    def __init__(self, name: _Optional[str] = ..., depth: _Optional[int] = ..., in_flight: _Optional[int] = ..., active_consumers: _Optional[int] = ...) -> None: ...
+    leader_node_id: int
+    def __init__(self, name: _Optional[str] = ..., depth: _Optional[int] = ..., in_flight: _Optional[int] = ..., active_consumers: _Optional[int] = ..., leader_node_id: _Optional[int] = ...) -> None: ...
 
 class ListQueuesResponse(_message.Message):
-    __slots__ = ("queues",)
+    __slots__ = ("queues", "cluster_node_count")
     QUEUES_FIELD_NUMBER: _ClassVar[int]
+    CLUSTER_NODE_COUNT_FIELD_NUMBER: _ClassVar[int]
     queues: _containers.RepeatedCompositeFieldContainer[QueueInfo]
-    def __init__(self, queues: _Optional[_Iterable[_Union[QueueInfo, _Mapping]]] = ...) -> None: ...
+    cluster_node_count: int
+    def __init__(self, queues: _Optional[_Iterable[_Union[QueueInfo, _Mapping]]] = ..., cluster_node_count: _Optional[int] = ...) -> None: ...
+
+class CreateApiKeyRequest(_message.Message):
+    __slots__ = ("name", "expires_at_ms", "is_superadmin")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_AT_MS_FIELD_NUMBER: _ClassVar[int]
+    IS_SUPERADMIN_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    expires_at_ms: int
+    is_superadmin: bool
+    def __init__(self, name: _Optional[str] = ..., expires_at_ms: _Optional[int] = ..., is_superadmin: bool = ...) -> None: ...
+
+class CreateApiKeyResponse(_message.Message):
+    __slots__ = ("key_id", "key", "is_superadmin")
+    KEY_ID_FIELD_NUMBER: _ClassVar[int]
+    KEY_FIELD_NUMBER: _ClassVar[int]
+    IS_SUPERADMIN_FIELD_NUMBER: _ClassVar[int]
+    key_id: str
+    key: str
+    is_superadmin: bool
+    def __init__(self, key_id: _Optional[str] = ..., key: _Optional[str] = ..., is_superadmin: bool = ...) -> None: ...
+
+class RevokeApiKeyRequest(_message.Message):
+    __slots__ = ("key_id",)
+    KEY_ID_FIELD_NUMBER: _ClassVar[int]
+    key_id: str
+    def __init__(self, key_id: _Optional[str] = ...) -> None: ...
+
+class RevokeApiKeyResponse(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class ListApiKeysRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class ApiKeyInfo(_message.Message):
+    __slots__ = ("key_id", "name", "created_at_ms", "expires_at_ms", "is_superadmin")
+    KEY_ID_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_MS_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_AT_MS_FIELD_NUMBER: _ClassVar[int]
+    IS_SUPERADMIN_FIELD_NUMBER: _ClassVar[int]
+    key_id: str
+    name: str
+    created_at_ms: int
+    expires_at_ms: int
+    is_superadmin: bool
+    def __init__(self, key_id: _Optional[str] = ..., name: _Optional[str] = ..., created_at_ms: _Optional[int] = ..., expires_at_ms: _Optional[int] = ..., is_superadmin: bool = ...) -> None: ...
+
+class ListApiKeysResponse(_message.Message):
+    __slots__ = ("keys",)
+    KEYS_FIELD_NUMBER: _ClassVar[int]
+    keys: _containers.RepeatedCompositeFieldContainer[ApiKeyInfo]
+    def __init__(self, keys: _Optional[_Iterable[_Union[ApiKeyInfo, _Mapping]]] = ...) -> None: ...
+
+class AclPermission(_message.Message):
+    __slots__ = ("kind", "pattern")
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    PATTERN_FIELD_NUMBER: _ClassVar[int]
+    kind: str
+    pattern: str
+    def __init__(self, kind: _Optional[str] = ..., pattern: _Optional[str] = ...) -> None: ...
+
+class SetAclRequest(_message.Message):
+    __slots__ = ("key_id", "permissions")
+    KEY_ID_FIELD_NUMBER: _ClassVar[int]
+    PERMISSIONS_FIELD_NUMBER: _ClassVar[int]
+    key_id: str
+    permissions: _containers.RepeatedCompositeFieldContainer[AclPermission]
+    def __init__(self, key_id: _Optional[str] = ..., permissions: _Optional[_Iterable[_Union[AclPermission, _Mapping]]] = ...) -> None: ...
+
+class SetAclResponse(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class GetAclRequest(_message.Message):
+    __slots__ = ("key_id",)
+    KEY_ID_FIELD_NUMBER: _ClassVar[int]
+    key_id: str
+    def __init__(self, key_id: _Optional[str] = ...) -> None: ...
+
+class GetAclResponse(_message.Message):
+    __slots__ = ("key_id", "permissions", "is_superadmin")
+    KEY_ID_FIELD_NUMBER: _ClassVar[int]
+    PERMISSIONS_FIELD_NUMBER: _ClassVar[int]
+    IS_SUPERADMIN_FIELD_NUMBER: _ClassVar[int]
+    key_id: str
+    permissions: _containers.RepeatedCompositeFieldContainer[AclPermission]
+    is_superadmin: bool
+    def __init__(self, key_id: _Optional[str] = ..., permissions: _Optional[_Iterable[_Union[AclPermission, _Mapping]]] = ..., is_superadmin: bool = ...) -> None: ...

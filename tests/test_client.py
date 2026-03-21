@@ -102,3 +102,128 @@ class TestAsyncClient:
 
             # Ack the message.
             await client.ack("test-async-eca", msg.id)
+
+
+class TestTlsClient:
+    """Integration tests for TLS connections."""
+
+    def test_tls_enqueue_consume_ack(self, tls_server: object) -> None:
+        """Full lifecycle over TLS: enqueue -> consume -> ack."""
+        from tests.conftest import TestServer
+
+        assert isinstance(tls_server, TestServer)
+        assert tls_server.tls_paths is not None
+
+        tls_server.create_queue("test-tls")
+
+        with open(tls_server.tls_paths["ca_cert"], "rb") as f:
+            ca_cert = f.read()
+        with open(tls_server.tls_paths["client_cert"], "rb") as f:
+            client_cert = f.read()
+        with open(tls_server.tls_paths["client_key"], "rb") as f:
+            client_key = f.read()
+
+        with fila.Client(
+            tls_server.addr,
+            ca_cert=ca_cert,
+            client_cert=client_cert,
+            client_key=client_key,
+        ) as client:
+            msg_id = client.enqueue("test-tls", {"secure": "true"}, b"tls payload")
+            assert msg_id != ""
+
+            stream = client.consume("test-tls")
+            msg = next(stream)
+
+            assert msg.id == msg_id
+            assert msg.payload == b"tls payload"
+
+            client.ack("test-tls", msg.id)
+
+    @pytest.mark.asyncio
+    async def test_async_tls_enqueue_consume_ack(self, tls_server: object) -> None:
+        """Full async lifecycle over TLS."""
+        from tests.conftest import TestServer
+
+        assert isinstance(tls_server, TestServer)
+        assert tls_server.tls_paths is not None
+
+        tls_server.create_queue("test-async-tls")
+
+        with open(tls_server.tls_paths["ca_cert"], "rb") as f:
+            ca_cert = f.read()
+        with open(tls_server.tls_paths["client_cert"], "rb") as f:
+            client_cert = f.read()
+        with open(tls_server.tls_paths["client_key"], "rb") as f:
+            client_key = f.read()
+
+        async with fila.AsyncClient(
+            tls_server.addr,
+            ca_cert=ca_cert,
+            client_cert=client_cert,
+            client_key=client_key,
+        ) as client:
+            msg_id = await client.enqueue("test-async-tls", None, b"async tls")
+            assert msg_id != ""
+
+            stream = await client.consume("test-async-tls")
+            msg = await stream.__anext__()
+
+            assert msg.id == msg_id
+            assert msg.payload == b"async tls"
+
+            await client.ack("test-async-tls", msg.id)
+
+
+class TestApiKeyAuth:
+    """Integration tests for API key authentication."""
+
+    def test_api_key_enqueue_consume_ack(self, auth_server: object) -> None:
+        """Full lifecycle with API key auth: enqueue -> consume -> ack."""
+        from tests.conftest import TestServer
+
+        assert isinstance(auth_server, TestServer)
+        assert auth_server.api_key is not None
+
+        auth_server.create_queue("test-auth")
+
+        with fila.Client(auth_server.addr, api_key=auth_server.api_key) as client:
+            msg_id = client.enqueue("test-auth", None, b"authenticated")
+            assert msg_id != ""
+
+            stream = client.consume("test-auth")
+            msg = next(stream)
+
+            assert msg.id == msg_id
+            assert msg.payload == b"authenticated"
+
+            client.ack("test-auth", msg.id)
+
+    def test_missing_api_key_rejected(self, auth_server: object) -> None:
+        """Requests without API key are rejected when auth is enabled."""
+        from tests.conftest import TestServer
+
+        assert isinstance(auth_server, TestServer)
+
+        # Connect without API key — should fail with UNAUTHENTICATED.
+        with fila.Client(auth_server.addr) as client:
+            with pytest.raises(fila.RPCError) as exc_info:
+                client.enqueue("test-auth", None, b"no-key")
+            import grpc
+            assert exc_info.value.code == grpc.StatusCode.UNAUTHENTICATED
+
+    @pytest.mark.asyncio
+    async def test_async_api_key_enqueue(self, auth_server: object) -> None:
+        """Async client with API key can enqueue successfully."""
+        from tests.conftest import TestServer
+
+        assert isinstance(auth_server, TestServer)
+        assert auth_server.api_key is not None
+
+        auth_server.create_queue("test-async-auth")
+
+        async with fila.AsyncClient(
+            auth_server.addr, api_key=auth_server.api_key
+        ) as client:
+            msg_id = await client.enqueue("test-async-auth", None, b"async auth")
+            assert msg_id != ""

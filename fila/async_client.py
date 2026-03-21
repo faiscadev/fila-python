@@ -15,6 +15,57 @@ from fila.types import ConsumeMessage
 from fila.v1 import service_pb2, service_pb2_grpc
 
 
+class _AsyncApiKeyInterceptor(
+    grpc.aio.UnaryUnaryClientInterceptor,
+    grpc.aio.UnaryStreamClientInterceptor,
+):
+    """Injects ``authorization: Bearer <key>`` metadata into every async RPC."""
+
+    def __init__(self, api_key: str) -> None:
+        self._metadata = grpc.aio.Metadata(("authorization", f"Bearer {api_key}"))
+
+    def _inject(
+        self, metadata: grpc.aio.Metadata | None
+    ) -> grpc.aio.Metadata:
+        merged = grpc.aio.Metadata()
+        if metadata is not None:
+            for key, value in metadata:
+                merged.add(key, value)
+        for key, value in self._metadata:
+            merged.add(key, value)
+        return merged
+
+    async def intercept_unary_unary(  # type: ignore[override]
+        self,
+        continuation: Any,
+        client_call_details: grpc.aio.ClientCallDetails,
+        request: Any,
+    ) -> Any:
+        new_details = grpc.aio.ClientCallDetails(  # type: ignore[call-arg]
+            client_call_details.method,
+            client_call_details.timeout,
+            self._inject(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+        )
+        return await continuation(new_details, request)
+
+    async def intercept_unary_stream(  # type: ignore[override]
+        self,
+        continuation: Any,
+        client_call_details: grpc.aio.ClientCallDetails,
+        request: Any,
+    ) -> Any:
+        new_details = grpc.aio.ClientCallDetails(  # type: ignore[call-arg]
+            client_call_details.method,
+            client_call_details.timeout,
+            self._inject(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+        )
+        return await continuation(new_details, request)
+
+
 class AsyncClient:
     """Asynchronous client for the Fila message broker.
 
@@ -32,15 +83,62 @@ class AsyncClient:
 
         async with AsyncClient("localhost:5555") as client:
             await client.enqueue("my-queue", None, b"hello")
+
+    TLS::
+
+        with open("ca.pem", "rb") as f:
+            ca = f.read()
+        client = AsyncClient("localhost:5555", ca_cert=ca)
+
+    mTLS + API key::
+
+        client = AsyncClient(
+            "localhost:5555",
+            ca_cert=ca,
+            client_cert=cert,
+            client_key=key,
+            api_key="fila_...",
+        )
     """
 
-    def __init__(self, addr: str) -> None:
+    def __init__(
+        self,
+        addr: str,
+        *,
+        ca_cert: bytes | None = None,
+        client_cert: bytes | None = None,
+        client_key: bytes | None = None,
+        api_key: str | None = None,
+    ) -> None:
         """Connect to a Fila broker at the given address.
 
         Args:
             addr: Broker address in "host:port" format (e.g., "localhost:5555").
+            ca_cert: PEM-encoded CA certificate for verifying the server.
+                     When provided, a TLS channel is used instead of an insecure one.
+            client_cert: PEM-encoded client certificate for mutual TLS (optional).
+            client_key: PEM-encoded client private key for mutual TLS (optional).
+            api_key: API key for authentication. When set, every RPC includes an
+                     ``authorization: Bearer <key>`` metadata header.
         """
-        self._channel = grpc.aio.insecure_channel(addr)
+        interceptors: list[grpc.aio.ClientInterceptor] = []
+        if api_key is not None:
+            interceptors.append(_AsyncApiKeyInterceptor(api_key))
+
+        if ca_cert is not None:
+            creds = grpc.ssl_channel_credentials(
+                root_certificates=ca_cert,
+                private_key=client_key,
+                certificate_chain=client_cert,
+            )
+            self._channel = grpc.aio.secure_channel(
+                addr, creds, interceptors=interceptors or None
+            )
+        else:
+            self._channel = grpc.aio.insecure_channel(
+                addr, interceptors=interceptors or None
+            )
+
         self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
 
     async def close(self) -> None:

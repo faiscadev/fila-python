@@ -46,9 +46,55 @@ async def main():
 asyncio.run(main())
 ```
 
+## TLS
+
+To connect over TLS, provide the CA certificate (and optionally client cert/key for mTLS):
+
+```python
+from fila import Client
+
+# Read certificates.
+with open("ca.pem", "rb") as f:
+    ca_cert = f.read()
+with open("client.pem", "rb") as f:
+    client_cert = f.read()
+with open("client-key.pem", "rb") as f:
+    client_key = f.read()
+
+# TLS only (server verification).
+client = Client("localhost:5555", ca_cert=ca_cert)
+
+# Mutual TLS (client + server verification).
+client = Client(
+    "localhost:5555",
+    ca_cert=ca_cert,
+    client_cert=client_cert,
+    client_key=client_key,
+)
+```
+
+## API Key Authentication
+
+When the server has API key auth enabled, pass the key to the client:
+
+```python
+from fila import Client
+
+client = Client("localhost:5555", api_key="fila_your_api_key_here")
+
+# Combined with TLS:
+client = Client(
+    "localhost:5555",
+    ca_cert=ca_cert,
+    api_key="fila_your_api_key_here",
+)
+```
+
+The API key is sent as `authorization: Bearer <key>` metadata on every RPC.
+
 ## API
 
-### `Client(addr)` / `AsyncClient(addr)`
+### `Client(addr, *, ca_cert=None, client_cert=None, client_key=None, api_key=None)` / `AsyncClient(...)`
 
 Connect to a Fila broker. Both support context manager protocol.
 

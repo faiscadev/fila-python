@@ -14,6 +14,46 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
+class _ApiKeyInterceptor(
+    grpc.UnaryUnaryClientInterceptor,
+    grpc.UnaryStreamClientInterceptor,
+):
+    """Injects ``authorization: Bearer <key>`` metadata into every RPC."""
+
+    def __init__(self, api_key: str) -> None:
+        self._metadata = (("authorization", f"Bearer {api_key}"),)
+
+    def _inject(
+        self, client_call_details: grpc.ClientCallDetails
+    ) -> grpc.ClientCallDetails:
+        metadata = list(client_call_details.metadata or [])
+        metadata.extend(self._metadata)
+        return grpc.ClientCallDetails(  # type: ignore[call-arg]
+            client_call_details.method,
+            client_call_details.timeout,
+            metadata,
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+            client_call_details.compression,
+        )
+
+    def intercept_unary_unary(  # type: ignore[override]
+        self,
+        continuation: Any,
+        client_call_details: grpc.ClientCallDetails,
+        request: Any,
+    ) -> Any:
+        return continuation(self._inject(client_call_details), request)
+
+    def intercept_unary_stream(  # type: ignore[override]
+        self,
+        continuation: Any,
+        client_call_details: grpc.ClientCallDetails,
+        request: Any,
+    ) -> Any:
+        return continuation(self._inject(client_call_details), request)
+
+
 class Client:
     """Synchronous client for the Fila message broker.
 
@@ -31,15 +71,58 @@ class Client:
 
         with Client("localhost:5555") as client:
             client.enqueue("my-queue", None, b"hello")
+
+    TLS::
+
+        with open("ca.pem", "rb") as f:
+            ca = f.read()
+        client = Client("localhost:5555", ca_cert=ca)
+
+    mTLS + API key::
+
+        client = Client(
+            "localhost:5555",
+            ca_cert=ca,
+            client_cert=cert,
+            client_key=key,
+            api_key="fila_...",
+        )
     """
 
-    def __init__(self, addr: str) -> None:
+    def __init__(
+        self,
+        addr: str,
+        *,
+        ca_cert: bytes | None = None,
+        client_cert: bytes | None = None,
+        client_key: bytes | None = None,
+        api_key: str | None = None,
+    ) -> None:
         """Connect to a Fila broker at the given address.
 
         Args:
             addr: Broker address in "host:port" format (e.g., "localhost:5555").
+            ca_cert: PEM-encoded CA certificate for verifying the server.
+                     When provided, a TLS channel is used instead of an insecure one.
+            client_cert: PEM-encoded client certificate for mutual TLS (optional).
+            client_key: PEM-encoded client private key for mutual TLS (optional).
+            api_key: API key for authentication. When set, every RPC includes an
+                     ``authorization: Bearer <key>`` metadata header.
         """
-        self._channel = grpc.insecure_channel(addr)
+        if ca_cert is not None:
+            creds = grpc.ssl_channel_credentials(
+                root_certificates=ca_cert,
+                private_key=client_key,
+                certificate_chain=client_cert,
+            )
+            self._channel = grpc.secure_channel(addr, creds)
+        else:
+            self._channel = grpc.insecure_channel(addr)
+
+        if api_key is not None:
+            interceptor = _ApiKeyInterceptor(api_key)
+            self._channel = grpc.intercept_channel(self._channel, interceptor)
+
         self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
 
     def close(self) -> None:
