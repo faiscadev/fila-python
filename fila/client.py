@@ -98,7 +98,11 @@ class Client:
         with Client("localhost:5555") as client:
             client.enqueue("my-queue", None, b"hello")
 
-    TLS::
+    TLS (system trust store)::
+
+        client = Client("localhost:5555", tls=True)
+
+    TLS (custom CA)::
 
         with open("ca.pem", "rb") as f:
             ca = f.read()
@@ -119,6 +123,7 @@ class Client:
         self,
         addr: str,
         *,
+        tls: bool = False,
         ca_cert: bytes | None = None,
         client_cert: bytes | None = None,
         client_key: bytes | None = None,
@@ -128,6 +133,9 @@ class Client:
 
         Args:
             addr: Broker address in "host:port" format (e.g., "localhost:5555").
+            tls: Enable TLS using the OS system trust store for server
+                 verification. Ignored when ``ca_cert`` is provided (which
+                 implies TLS). Defaults to ``False``.
             ca_cert: PEM-encoded CA certificate for verifying the server.
                      When provided, a TLS channel is used instead of an insecure one.
             client_cert: PEM-encoded client certificate for mutual TLS (optional).
@@ -135,12 +143,14 @@ class Client:
             api_key: API key for authentication. When set, every RPC includes an
                      ``authorization: Bearer <key>`` metadata header.
         """
-        if (client_cert is not None or client_key is not None) and ca_cert is None:
+        use_tls = tls or ca_cert is not None
+
+        if (client_cert is not None or client_key is not None) and not use_tls:
             raise ValueError(
-                "client_cert and client_key require ca_cert to establish a TLS channel"
+                "client_cert and client_key require ca_cert or tls=True to establish a TLS channel"
             )
 
-        if ca_cert is not None:
+        if use_tls:
             creds = grpc.ssl_channel_credentials(
                 root_certificates=ca_cert,
                 private_key=client_key,
