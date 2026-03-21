@@ -63,7 +63,7 @@ class _ApiKeyInterceptor(
             client_call_details.compression,
         )
 
-    def intercept_unary_unary(  # type: ignore[override]
+    def intercept_unary_unary(
         self,
         continuation: Any,
         client_call_details: grpc.ClientCallDetails,
@@ -71,7 +71,7 @@ class _ApiKeyInterceptor(
     ) -> Any:
         return continuation(self._inject(client_call_details), request)
 
-    def intercept_unary_stream(  # type: ignore[override]
+    def intercept_unary_stream(
         self,
         continuation: Any,
         client_call_details: grpc.ClientCallDetails,

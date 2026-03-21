@@ -61,7 +61,7 @@ class _AsyncApiKeyInterceptor(
             merged.add(key, value)
         return merged
 
-    async def intercept_unary_unary(  # type: ignore[override]
+    async def intercept_unary_unary(
         self,
         continuation: Any,
         client_call_details: grpc.aio.ClientCallDetails,
@@ -73,11 +73,11 @@ class _AsyncApiKeyInterceptor(
             self._inject(client_call_details.metadata),
             client_call_details.credentials,
             client_call_details.wait_for_ready,
-            client_call_details.compression,
+            getattr(client_call_details, "compression", None),
         )
         return await continuation(new_details, request)
 
-    async def intercept_unary_stream(  # type: ignore[override]
+    async def intercept_unary_stream(
         self,
         continuation: Any,
         client_call_details: grpc.aio.ClientCallDetails,
@@ -89,7 +89,7 @@ class _AsyncApiKeyInterceptor(
             self._inject(client_call_details.metadata),
             client_call_details.credentials,
             client_call_details.wait_for_ready,
-            client_call_details.compression,
+            getattr(client_call_details, "compression", None),
         )
         return await continuation(new_details, request)
 

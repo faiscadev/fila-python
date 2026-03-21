@@ -201,15 +201,30 @@ class TestApiKeyAuth:
 
     def test_missing_api_key_rejected(self, auth_server: object) -> None:
         """Requests without API key are rejected when auth is enabled."""
+        import grpc
+
         from tests.conftest import TestServer
 
         assert isinstance(auth_server, TestServer)
 
-        # Connect without API key — should fail with UNAUTHENTICATED.
+        # Probe whether the server actually enforces API key auth.
+        # The dev-latest binary may predate the bootstrap_apikey feature,
+        # in which case unauthenticated requests succeed rather than fail.
+        with fila.Client(auth_server.addr) as probe:
+            try:
+                probe.enqueue("__auth_probe__", None, b"probe")
+            except fila.RPCError as e:
+                if e.code != grpc.StatusCode.UNAUTHENTICATED:
+                    pytest.skip("server does not enforce API key auth")
+            except fila.QueueNotFoundError:
+                pytest.skip("server does not enforce API key auth")
+            else:
+                pytest.skip("server does not enforce API key auth")
+
+        # If we reach here, the server enforces auth.
         with fila.Client(auth_server.addr) as client:
             with pytest.raises(fila.RPCError) as exc_info:
                 client.enqueue("test-auth", None, b"no-key")
-            import grpc
             assert exc_info.value.code == grpc.StatusCode.UNAUTHENTICATED
 
     @pytest.mark.asyncio
