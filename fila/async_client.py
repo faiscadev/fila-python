@@ -34,7 +34,7 @@ class _AsyncClientCallDetails(
         credentials: grpc.CallCredentials | None,
         wait_for_ready: bool | None,
     ) -> _AsyncClientCallDetails:
-        return super().__new__(cls, method, timeout, metadata, credentials, wait_for_ready)  # type: ignore[call-arg]
+        return super().__new__(cls, method, timeout, metadata, credentials, wait_for_ready)  # type: ignore[no-any-return]
 
     def __init__(
         self,
