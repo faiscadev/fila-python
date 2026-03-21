@@ -20,9 +20,21 @@ class _AsyncClientCallDetails(
 ):
     """Concrete ``ClientCallDetails`` for the async interceptor chain.
 
-    ``grpc.aio.ClientCallDetails`` is abstract and cannot be instantiated
-    directly, so we need our own subclass.
+    ``grpc.aio.ClientCallDetails`` is a namedtuple with 5 fields (method,
+    timeout, metadata, credentials, wait_for_ready).  We override ``__new__``
+    so the namedtuple layer receives exactly those five, then set any extra
+    attribute (``compression``) in ``__init__``.
     """
+
+    def __new__(
+        cls,
+        method: str,
+        timeout: float | None,
+        metadata: grpc.aio.Metadata | None,
+        credentials: grpc.CallCredentials | None,
+        wait_for_ready: bool | None,
+    ) -> _AsyncClientCallDetails:
+        return super().__new__(cls, method, timeout, metadata, credentials, wait_for_ready)  # type: ignore[call-arg]
 
     def __init__(
         self,
@@ -31,14 +43,9 @@ class _AsyncClientCallDetails(
         metadata: grpc.aio.Metadata | None,
         credentials: grpc.CallCredentials | None,
         wait_for_ready: bool | None,
-        compression: grpc.Compression | None,
     ) -> None:
-        self.method = method
-        self.timeout = timeout
-        self.metadata = metadata
-        self.credentials = credentials
-        self.wait_for_ready = wait_for_ready
-        self.compression = compression
+        # Fields are already set by __new__ (namedtuple).  Nothing extra to do.
+        pass
 
 
 class _AsyncApiKeyInterceptor(
@@ -73,7 +80,6 @@ class _AsyncApiKeyInterceptor(
             self._inject(client_call_details.metadata),
             client_call_details.credentials,
             client_call_details.wait_for_ready,
-            getattr(client_call_details, "compression", None),
         )
         return await continuation(new_details, request)
 
@@ -89,7 +95,6 @@ class _AsyncApiKeyInterceptor(
             self._inject(client_call_details.metadata),
             client_call_details.credentials,
             client_call_details.wait_for_ready,
-            getattr(client_call_details, "compression", None),
         )
         return await continuation(new_details, request)
 
