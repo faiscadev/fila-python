@@ -22,7 +22,8 @@ jobs:
           SHORT_SHA=$(git rev-parse --short HEAD)
           DEV_VERSION="0.1.dev${COMMIT_COUNT}"
           sed -i "s/^version = .*/version = \"${DEV_VERSION}\"/" pyproject.toml
-          echo "Publishing version: ${DEV_VERSION}"
+          sed -i "s/^description = .*/description = \"Python client SDK for the Fila message broker (dev build from ${SHORT_SHA})\"/" pyproject.toml
+          echo "Publishing version: ${DEV_VERSION} (${SHORT_SHA})"
       - run: pip install build
       - run: python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1
