@@ -215,7 +215,7 @@ class TestApiKeyAuth:
                 probe.enqueue("__auth_probe__", None, b"probe")
             except fila.RPCError as e:
                 if e.code != grpc.StatusCode.UNAUTHENTICATED:
-                    pytest.skip("server does not enforce API key auth")
+                    pytest.fail(f"unexpected RPC error during auth probe: {e.code}")
             except fila.QueueNotFoundError:
                 pytest.skip("server does not enforce API key auth")
             else:
