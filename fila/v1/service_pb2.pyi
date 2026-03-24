@@ -2,7 +2,7 @@ from fila.v1 import messages_pb2 as _messages_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from collections.abc import Mapping as _Mapping
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
 from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
@@ -37,10 +37,12 @@ class ConsumeRequest(_message.Message):
     def __init__(self, queue: _Optional[str] = ...) -> None: ...
 
 class ConsumeResponse(_message.Message):
-    __slots__ = ("message",)
+    __slots__ = ("message", "messages")
     MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    MESSAGES_FIELD_NUMBER: _ClassVar[int]
     message: _messages_pb2.Message
-    def __init__(self, message: _Optional[_Union[_messages_pb2.Message, _Mapping]] = ...) -> None: ...
+    messages: _containers.RepeatedCompositeFieldContainer[_messages_pb2.Message]
+    def __init__(self, message: _Optional[_Union[_messages_pb2.Message, _Mapping]] = ..., messages: _Optional[_Iterable[_Union[_messages_pb2.Message, _Mapping]]] = ...) -> None: ...
 
 class AckRequest(_message.Message):
     __slots__ = ("queue", "message_id")
@@ -67,3 +69,23 @@ class NackRequest(_message.Message):
 class NackResponse(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class BatchEnqueueRequest(_message.Message):
+    __slots__ = ("messages",)
+    MESSAGES_FIELD_NUMBER: _ClassVar[int]
+    messages: _containers.RepeatedCompositeFieldContainer[EnqueueRequest]
+    def __init__(self, messages: _Optional[_Iterable[_Union[EnqueueRequest, _Mapping]]] = ...) -> None: ...
+
+class BatchEnqueueResponse(_message.Message):
+    __slots__ = ("results",)
+    RESULTS_FIELD_NUMBER: _ClassVar[int]
+    results: _containers.RepeatedCompositeFieldContainer[BatchEnqueueResult]
+    def __init__(self, results: _Optional[_Iterable[_Union[BatchEnqueueResult, _Mapping]]] = ...) -> None: ...
+
+class BatchEnqueueResult(_message.Message):
+    __slots__ = ("success", "error")
+    SUCCESS_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    success: EnqueueResponse
+    error: str
+    def __init__(self, success: _Optional[_Union[EnqueueResponse, _Mapping]] = ..., error: _Optional[str] = ...) -> None: ...

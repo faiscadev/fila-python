@@ -26,6 +26,15 @@ class RPCError(FilaError):
         super().__init__(f"rpc error (code = {code.name}): {message}")
 
 
+class BatchEnqueueError(FilaError):
+    """Raised when a batched enqueue fails at the RPC level.
+
+    Individual per-message failures are reported via ``BatchEnqueueResult.error``
+    and do not raise this exception. This is raised only when the entire batch
+    RPC fails (e.g., network error, server unavailable).
+    """
+
+
 def _map_enqueue_error(err: grpc.RpcError) -> FilaError:
     """Map a gRPC error from an enqueue call to a Fila exception."""
     code = err.code()
@@ -55,4 +64,12 @@ def _map_nack_error(err: grpc.RpcError) -> FilaError:
     code = err.code()
     if code == grpc.StatusCode.NOT_FOUND:
         return MessageNotFoundError(f"nack: {err.details()}")
+    return RPCError(code, err.details() or "")
+
+
+def _map_batch_enqueue_error(err: grpc.RpcError) -> FilaError:
+    """Map a gRPC error from a batch enqueue call to a Fila exception."""
+    code = err.code()
+    if code == grpc.StatusCode.NOT_FOUND:
+        return QueueNotFoundError(f"batch_enqueue: {err.details()}")
     return RPCError(code, err.details() or "")

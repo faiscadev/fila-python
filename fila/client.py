@@ -6,8 +6,15 @@ from typing import TYPE_CHECKING, Any
 
 import grpc
 
-from fila.errors import _map_ack_error, _map_consume_error, _map_enqueue_error, _map_nack_error
-from fila.types import ConsumeMessage
+from fila.batcher import AutoBatcher, LingerBatcher
+from fila.errors import (
+    _map_ack_error,
+    _map_batch_enqueue_error,
+    _map_consume_error,
+    _map_enqueue_error,
+    _map_nack_error,
+)
+from fila.types import BatchEnqueueResult, BatchMode, ConsumeMessage, Linger
 from fila.v1 import service_pb2, service_pb2_grpc
 
 if TYPE_CHECKING:
@@ -31,6 +38,19 @@ def _extract_leader_hint(err: grpc.RpcError) -> str | None:
         if key == _LEADER_HINT_KEY:
             return str(value)
     return None
+
+
+def _proto_msg_to_consume_message(msg: Any) -> ConsumeMessage:
+    """Convert a protobuf Message to a ConsumeMessage."""
+    metadata = msg.metadata
+    return ConsumeMessage(
+        id=msg.id,
+        headers=dict(msg.headers),
+        payload=bytes(msg.payload),
+        fairness_key=metadata.fairness_key if metadata else "",
+        attempt_count=metadata.attempt_count if metadata else 0,
+        queue=metadata.queue_id if metadata else "",
+    )
 
 
 class _ClientCallDetails(
@@ -102,7 +122,8 @@ class _ApiKeyInterceptor(
 class Client:
     """Synchronous client for the Fila message broker.
 
-    Wraps the hot-path gRPC operations: enqueue, consume, ack, nack.
+    Wraps the hot-path gRPC operations: enqueue, batch_enqueue, consume, ack,
+    nack.
 
     Usage::
 
@@ -116,6 +137,17 @@ class Client:
 
         with Client("localhost:5555") as client:
             client.enqueue("my-queue", None, b"hello")
+
+    Batch modes::
+
+        # AUTO (default): opportunistic batching via background thread
+        client = Client("localhost:5555")
+
+        # DISABLED: each enqueue() is a direct RPC
+        client = Client("localhost:5555", batch_mode=BatchMode.DISABLED)
+
+        # LINGER: timer-based forced batching
+        client = Client("localhost:5555", batch_mode=Linger(linger_ms=10, batch_size=100))
 
     TLS (system trust store)::
 
@@ -147,6 +179,8 @@ class Client:
         client_cert: bytes | None = None,
         client_key: bytes | None = None,
         api_key: str | None = None,
+        batch_mode: BatchMode | Linger = BatchMode.AUTO,
+        max_batch_size: int = 1000,
     ) -> None:
         """Connect to a Fila broker at the given address.
 
@@ -161,6 +195,10 @@ class Client:
             client_key: PEM-encoded client private key for mutual TLS (optional).
             api_key: API key for authentication. When set, every RPC includes an
                      ``authorization: Bearer <key>`` metadata header.
+            batch_mode: Controls how ``enqueue()`` routes messages. Defaults to
+                        ``BatchMode.AUTO`` (opportunistic batching).
+            max_batch_size: Maximum number of messages per batch when using
+                            ``BatchMode.AUTO``. Defaults to 1000.
         """
         self._tls = tls
         self._ca_cert = ca_cert
@@ -176,6 +214,21 @@ class Client:
 
         self._channel = self._make_channel(addr)
         self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
+
+        # Set up the batcher based on the chosen mode.
+        self._batcher: AutoBatcher | LingerBatcher | None = None
+        if isinstance(batch_mode, Linger):
+            self._batcher = LingerBatcher(
+                self._stub,
+                linger_ms=batch_mode.linger_ms,
+                batch_size=batch_mode.batch_size,
+            )
+        elif batch_mode is BatchMode.AUTO:
+            self._batcher = AutoBatcher(
+                self._stub,
+                max_batch_size=max_batch_size,
+            )
+        # BatchMode.DISABLED: self._batcher stays None
 
     def _make_channel(self, addr: str) -> grpc.Channel:
         """Create a gRPC channel to the given address using stored credentials."""
@@ -198,7 +251,9 @@ class Client:
         return channel
 
     def close(self) -> None:
-        """Close the underlying gRPC channel."""
+        """Drain pending batched messages and close the underlying gRPC channel."""
+        if self._batcher is not None:
+            self._batcher.close()
         self._channel.close()
 
     def __enter__(self) -> Client:
@@ -215,6 +270,13 @@ class Client:
     ) -> str:
         """Enqueue a message to the specified queue.
 
+        When a batcher is active (``BatchMode.AUTO`` or ``Linger``), the
+        message is submitted to the background batcher and this call blocks
+        until the batch is flushed and the result is available.
+
+        When batching is disabled (``BatchMode.DISABLED``), this call makes
+        a direct synchronous RPC.
+
         Args:
             queue: Target queue name.
             headers: Optional message headers.
@@ -224,20 +286,78 @@ class Client:
             Broker-assigned message ID (UUIDv7).
 
         Raises:
-            QueueNotFoundError: If the queue does not exist.
+            QueueNotFoundError: If the queue does not exist (DISABLED mode).
+            BatchEnqueueError: If the batch RPC fails (AUTO/LINGER mode).
             RPCError: For unexpected gRPC failures.
         """
+        proto = service_pb2.EnqueueRequest(
+            queue=queue,
+            headers=headers or {},
+            payload=payload,
+        )
+
+        if self._batcher is not None:
+            future = self._batcher.submit(proto)
+            return future.result()
+
+        # Direct RPC (DISABLED mode).
         try:
-            resp = self._stub.Enqueue(
-                service_pb2.EnqueueRequest(
-                    queue=queue,
-                    headers=headers or {},
-                    payload=payload,
-                )
-            )
+            resp = self._stub.Enqueue(proto)
         except grpc.RpcError as e:
             raise _map_enqueue_error(e) from e
         return str(resp.message_id)
+
+    def batch_enqueue(
+        self,
+        messages: list[tuple[str, dict[str, str] | None, bytes]],
+    ) -> list[BatchEnqueueResult]:
+        """Enqueue multiple messages in a single RPC.
+
+        This is an explicit batch operation that always uses the BatchEnqueue
+        RPC regardless of the batch_mode setting.
+
+        Args:
+            messages: List of (queue, headers, payload) tuples.
+
+        Returns:
+            List of ``BatchEnqueueResult`` objects, one per input message.
+            Each result has either a ``message_id`` (success) or ``error``
+            (per-message failure).
+
+        Raises:
+            QueueNotFoundError: If a referenced queue does not exist.
+            RPCError: For unexpected gRPC failures.
+        """
+        proto_messages = [
+            service_pb2.EnqueueRequest(
+                queue=q,
+                headers=h or {},
+                payload=p,
+            )
+            for q, h, p in messages
+        ]
+
+        try:
+            resp = self._stub.BatchEnqueue(
+                service_pb2.BatchEnqueueRequest(messages=proto_messages)
+            )
+        except grpc.RpcError as e:
+            raise _map_batch_enqueue_error(e) from e
+
+        results: list[BatchEnqueueResult] = []
+        for r in resp.results:
+            if r.HasField("success"):
+                results.append(
+                    BatchEnqueueResult(
+                        message_id=str(r.success.message_id),
+                        error=None,
+                    )
+                )
+            else:
+                results.append(
+                    BatchEnqueueResult(message_id=None, error=r.error)
+                )
+        return results
 
     def consume(self, queue: str) -> Iterator[ConsumeMessage]:
         """Open a streaming consumer on the specified queue.
@@ -278,6 +398,8 @@ class Client:
         self._channel.close()
         self._channel = self._make_channel(leader_addr)
         self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
+        if self._batcher is not None:
+            self._batcher.update_stub(self._stub)
         try:
             return self._stub.Consume(
                 service_pb2.ConsumeRequest(queue=queue)
@@ -289,22 +411,25 @@ class Client:
         self,
         stream: Any,
     ) -> Iterator[ConsumeMessage]:
-        """Internal generator reading from the gRPC stream."""
+        """Internal generator reading from the gRPC stream.
+
+        Handles both singular ``message`` field (backward compatible) and
+        repeated ``messages`` field (batched delivery).
+        """
         try:
             for resp in stream:
+                # Check batched messages first (repeated field).
+                if len(resp.messages) > 0:
+                    for msg in resp.messages:
+                        if msg is not None and msg.ByteSize():
+                            yield _proto_msg_to_consume_message(msg)
+                    continue
+
+                # Fall back to singular message field.
                 msg = resp.message
                 if msg is None or not msg.ByteSize():
                     continue  # keepalive
-                metadata = msg.metadata
-                cm = ConsumeMessage(
-                    id=msg.id,
-                    headers=dict(msg.headers),
-                    payload=bytes(msg.payload),
-                    fairness_key=metadata.fairness_key if metadata else "",
-                    attempt_count=metadata.attempt_count if metadata else 0,
-                    queue=metadata.queue_id if metadata else "",
-                )
-                yield cm
+                yield _proto_msg_to_consume_message(msg)
         except grpc.RpcError:
             return
 

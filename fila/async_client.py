@@ -10,8 +10,15 @@ import grpc.aio
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-from fila.errors import _map_ack_error, _map_consume_error, _map_enqueue_error, _map_nack_error
-from fila.types import ConsumeMessage
+from fila.client import _proto_msg_to_consume_message
+from fila.errors import (
+    _map_ack_error,
+    _map_batch_enqueue_error,
+    _map_consume_error,
+    _map_enqueue_error,
+    _map_nack_error,
+)
+from fila.types import BatchEnqueueResult, ConsumeMessage
 from fila.v1 import service_pb2, service_pb2_grpc
 
 
@@ -118,7 +125,8 @@ def _extract_leader_hint(err: grpc.RpcError) -> str | None:
 class AsyncClient:
     """Asynchronous client for the Fila message broker.
 
-    Wraps the hot-path gRPC operations: enqueue, consume, ack, nack.
+    Wraps the hot-path gRPC operations: enqueue, batch_enqueue, consume, ack,
+    nack.
 
     Usage::
 
@@ -256,6 +264,55 @@ class AsyncClient:
             raise _map_enqueue_error(e) from e
         return str(resp.message_id)
 
+    async def batch_enqueue(
+        self,
+        messages: list[tuple[str, dict[str, str] | None, bytes]],
+    ) -> list[BatchEnqueueResult]:
+        """Enqueue multiple messages in a single RPC.
+
+        Args:
+            messages: List of (queue, headers, payload) tuples.
+
+        Returns:
+            List of ``BatchEnqueueResult`` objects, one per input message.
+            Each result has either a ``message_id`` (success) or ``error``
+            (per-message failure).
+
+        Raises:
+            QueueNotFoundError: If a referenced queue does not exist.
+            RPCError: For unexpected gRPC failures.
+        """
+        proto_messages = [
+            service_pb2.EnqueueRequest(
+                queue=q,
+                headers=h or {},
+                payload=p,
+            )
+            for q, h, p in messages
+        ]
+
+        try:
+            resp = await self._stub.BatchEnqueue(
+                service_pb2.BatchEnqueueRequest(messages=proto_messages)
+            )
+        except grpc.RpcError as e:
+            raise _map_batch_enqueue_error(e) from e
+
+        results: list[BatchEnqueueResult] = []
+        for r in resp.results:
+            if r.HasField("success"):
+                results.append(
+                    BatchEnqueueResult(
+                        message_id=str(r.success.message_id),
+                        error=None,
+                    )
+                )
+            else:
+                results.append(
+                    BatchEnqueueResult(message_id=None, error=r.error)
+                )
+        return results
+
     async def consume(self, queue: str) -> AsyncIterator[ConsumeMessage]:
         """Open a streaming consumer on the specified queue.
 
@@ -306,22 +363,25 @@ class AsyncClient:
         self,
         stream: Any,
     ) -> AsyncIterator[ConsumeMessage]:
-        """Internal async generator reading from the gRPC stream."""
+        """Internal async generator reading from the gRPC stream.
+
+        Handles both singular ``message`` field (backward compatible) and
+        repeated ``messages`` field (batched delivery).
+        """
         try:
             async for resp in stream:
+                # Check batched messages first (repeated field).
+                if len(resp.messages) > 0:
+                    for msg in resp.messages:
+                        if msg is not None and msg.ByteSize():
+                            yield _proto_msg_to_consume_message(msg)
+                    continue
+
+                # Fall back to singular message field.
                 msg = resp.message
                 if msg is None or not msg.ByteSize():
                     continue  # keepalive
-                metadata = msg.metadata
-                cm = ConsumeMessage(
-                    id=msg.id,
-                    headers=dict(msg.headers),
-                    payload=bytes(msg.payload),
-                    fairness_key=metadata.fairness_key if metadata else "",
-                    attempt_count=metadata.attempt_count if metadata else 0,
-                    queue=metadata.queue_id if metadata else "",
-                )
-                yield cm
+                yield _proto_msg_to_consume_message(msg)
         except grpc.RpcError:
             return
 

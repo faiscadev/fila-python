@@ -5,7 +5,7 @@ import warnings
 
 from fila.v1 import service_pb2 as fila_dot_v1_dot_service__pb2
 
-GRPC_GENERATED_VERSION = '1.78.0'
+GRPC_GENERATED_VERSION = '1.78.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -40,6 +40,11 @@ class FilaServiceStub(object):
                 request_serializer=fila_dot_v1_dot_service__pb2.EnqueueRequest.SerializeToString,
                 response_deserializer=fila_dot_v1_dot_service__pb2.EnqueueResponse.FromString,
                 _registered_method=True)
+        self.BatchEnqueue = channel.unary_unary(
+                '/fila.v1.FilaService/BatchEnqueue',
+                request_serializer=fila_dot_v1_dot_service__pb2.BatchEnqueueRequest.SerializeToString,
+                response_deserializer=fila_dot_v1_dot_service__pb2.BatchEnqueueResponse.FromString,
+                _registered_method=True)
         self.Consume = channel.unary_stream(
                 '/fila.v1.FilaService/Consume',
                 request_serializer=fila_dot_v1_dot_service__pb2.ConsumeRequest.SerializeToString,
@@ -62,6 +67,12 @@ class FilaServiceServicer(object):
     """
 
     def Enqueue(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def BatchEnqueue(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -92,6 +103,11 @@ def add_FilaServiceServicer_to_server(servicer, server):
                     servicer.Enqueue,
                     request_deserializer=fila_dot_v1_dot_service__pb2.EnqueueRequest.FromString,
                     response_serializer=fila_dot_v1_dot_service__pb2.EnqueueResponse.SerializeToString,
+            ),
+            'BatchEnqueue': grpc.unary_unary_rpc_method_handler(
+                    servicer.BatchEnqueue,
+                    request_deserializer=fila_dot_v1_dot_service__pb2.BatchEnqueueRequest.FromString,
+                    response_serializer=fila_dot_v1_dot_service__pb2.BatchEnqueueResponse.SerializeToString,
             ),
             'Consume': grpc.unary_stream_rpc_method_handler(
                     servicer.Consume,
@@ -137,6 +153,33 @@ class FilaService(object):
             '/fila.v1.FilaService/Enqueue',
             fila_dot_v1_dot_service__pb2.EnqueueRequest.SerializeToString,
             fila_dot_v1_dot_service__pb2.EnqueueResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def BatchEnqueue(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/fila.v1.FilaService/BatchEnqueue',
+            fila_dot_v1_dot_service__pb2.BatchEnqueueRequest.SerializeToString,
+            fila_dot_v1_dot_service__pb2.BatchEnqueueResponse.FromString,
             options,
             channel_credentials,
             insecure,
