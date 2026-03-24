@@ -29,7 +29,7 @@ def _extract_leader_hint(err: grpc.RpcError) -> str | None:
         return None
     for key, value in trailing:
         if key == _LEADER_HINT_KEY:
-            return value
+            return str(value)
     return None
 
 
