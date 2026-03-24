@@ -275,6 +275,7 @@ class Client:
 
     def _reconnect_and_consume(self, leader_addr: str, queue: str) -> Any:
         """Create a new channel to *leader_addr* and retry the consume call."""
+        self._channel.close()
         self._channel = self._make_channel(leader_addr)
         self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
         try:
