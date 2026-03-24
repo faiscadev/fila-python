@@ -99,6 +99,22 @@ class _AsyncApiKeyInterceptor(
         return await continuation(new_details, request)
 
 
+_LEADER_HINT_KEY = "x-fila-leader-addr"
+
+
+def _extract_leader_hint(err: grpc.RpcError) -> str | None:
+    """Return the leader address from trailing metadata, if present."""
+    if err.code() != grpc.StatusCode.UNAVAILABLE:
+        return None
+    trailing = err.trailing_metadata()
+    if trailing is None:
+        return None
+    for key, value in trailing:
+        if key == _LEADER_HINT_KEY:
+            return str(value)
+    return None
+
+
 class AsyncClient:
     """Asynchronous client for the Fila message broker.
 
@@ -162,32 +178,41 @@ class AsyncClient:
             api_key: API key for authentication. When set, every RPC includes an
                      ``authorization: Bearer <key>`` metadata header.
         """
-        use_tls = tls or ca_cert is not None
+        self._tls = tls
+        self._ca_cert = ca_cert
+        self._client_cert = client_cert
+        self._client_key = client_key
+        self._api_key = api_key
 
+        use_tls = tls or ca_cert is not None
         if (client_cert is not None or client_key is not None) and not use_tls:
             raise ValueError(
                 "client_cert and client_key require ca_cert or tls=True to establish a TLS channel"
             )
 
+        self._channel = self._make_channel(addr)
+        self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
+
+    def _make_channel(self, addr: str) -> grpc.aio.Channel:
+        """Create an async gRPC channel to the given address using stored credentials."""
+        use_tls = self._tls or self._ca_cert is not None
+
         interceptors: list[grpc.aio.ClientInterceptor] = []
-        if api_key is not None:
-            interceptors.append(_AsyncApiKeyInterceptor(api_key))
+        if self._api_key is not None:
+            interceptors.append(_AsyncApiKeyInterceptor(self._api_key))
 
         if use_tls:
             creds = grpc.ssl_channel_credentials(
-                root_certificates=ca_cert,
-                private_key=client_key,
-                certificate_chain=client_cert,
+                root_certificates=self._ca_cert,
+                private_key=self._client_key,
+                certificate_chain=self._client_cert,
             )
-            self._channel = grpc.aio.secure_channel(
+            return grpc.aio.secure_channel(
                 addr, creds, interceptors=interceptors or None
             )
-        else:
-            self._channel = grpc.aio.insecure_channel(
-                addr, interceptors=interceptors or None
-            )
-
-        self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
+        return grpc.aio.insecure_channel(
+            addr, interceptors=interceptors or None
+        )
 
     async def close(self) -> None:
         """Close the underlying gRPC channel."""
@@ -238,6 +263,10 @@ class AsyncClient:
         server stream closes or an error occurs. Nil message frames (keepalive
         signals) are skipped automatically.
 
+        If the server returns UNAVAILABLE with an ``x-fila-leader-addr``
+        trailing metadata entry, the client transparently reconnects to the
+        leader address and retries the consume call once.
+
         Args:
             queue: Queue to consume from.
 
@@ -253,9 +282,25 @@ class AsyncClient:
                 service_pb2.ConsumeRequest(queue=queue)
             )
         except grpc.RpcError as e:
-            raise _map_consume_error(e) from e
+            leader_addr = _extract_leader_hint(e)
+            if leader_addr is not None:
+                stream = await self._reconnect_and_consume(leader_addr, queue)
+            else:
+                raise _map_consume_error(e) from e
 
         return self._consume_iter(stream)
+
+    async def _reconnect_and_consume(self, leader_addr: str, queue: str) -> Any:
+        """Create a new channel to *leader_addr* and retry the consume call."""
+        await self._channel.close()
+        self._channel = self._make_channel(leader_addr)
+        self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
+        try:
+            return self._stub.Consume(
+                service_pb2.ConsumeRequest(queue=queue)
+            )
+        except grpc.RpcError as e:
+            raise _map_consume_error(e) from e
 
     async def _consume_iter(
         self,
