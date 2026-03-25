@@ -6,15 +6,16 @@ from typing import TYPE_CHECKING, Any
 
 import grpc
 
-from fila.batcher import AutoBatcher, LingerBatcher
+from fila.batcher import AutoAccumulator, LingerAccumulator
 from fila.errors import (
+    EnqueueError,
     _map_ack_error,
-    _map_batch_enqueue_error,
     _map_consume_error,
     _map_enqueue_error,
+    _map_enqueue_result_error,
     _map_nack_error,
 )
-from fila.types import BatchEnqueueResult, BatchMode, ConsumeMessage, Linger
+from fila.types import AccumulatorMode, ConsumeMessage, EnqueueResult, Linger
 from fila.v1 import service_pb2, service_pb2_grpc
 
 if TYPE_CHECKING:
@@ -51,6 +52,14 @@ def _proto_msg_to_consume_message(msg: Any) -> ConsumeMessage:
         attempt_count=metadata.attempt_count if metadata else 0,
         queue=metadata.queue_id if metadata else "",
     )
+
+
+def _proto_enqueue_result_to_sdk(result: Any) -> EnqueueResult:
+    """Convert a proto EnqueueResult to the SDK type."""
+    which = result.WhichOneof("result")
+    if which == "message_id":
+        return EnqueueResult(message_id=str(result.message_id), error=None)
+    return EnqueueResult(message_id=None, error=result.error.message)
 
 
 class _ClientCallDetails(
@@ -122,7 +131,7 @@ class _ApiKeyInterceptor(
 class Client:
     """Synchronous client for the Fila message broker.
 
-    Wraps the hot-path gRPC operations: enqueue, batch_enqueue, consume, ack,
+    Wraps the hot-path gRPC operations: enqueue, enqueue_many, consume, ack,
     nack.
 
     Usage::
@@ -138,16 +147,16 @@ class Client:
         with Client("localhost:5555") as client:
             client.enqueue("my-queue", None, b"hello")
 
-    Batch modes::
+    Accumulator modes::
 
-        # AUTO (default): opportunistic batching via background thread
+        # AUTO (default): opportunistic accumulation via background thread
         client = Client("localhost:5555")
 
         # DISABLED: each enqueue() is a direct RPC
-        client = Client("localhost:5555", batch_mode=BatchMode.DISABLED)
+        client = Client("localhost:5555", accumulator_mode=AccumulatorMode.DISABLED)
 
-        # LINGER: timer-based forced batching
-        client = Client("localhost:5555", batch_mode=Linger(linger_ms=10, batch_size=100))
+        # LINGER: timer-based forced accumulation
+        client = Client("localhost:5555", accumulator_mode=Linger(linger_ms=10, max_messages=100))
 
     TLS (system trust store)::
 
@@ -179,8 +188,8 @@ class Client:
         client_cert: bytes | None = None,
         client_key: bytes | None = None,
         api_key: str | None = None,
-        batch_mode: BatchMode | Linger = BatchMode.AUTO,
-        max_batch_size: int = 1000,
+        accumulator_mode: AccumulatorMode | Linger = AccumulatorMode.AUTO,
+        max_accumulator_messages: int = 1000,
     ) -> None:
         """Connect to a Fila broker at the given address.
 
@@ -195,10 +204,12 @@ class Client:
             client_key: PEM-encoded client private key for mutual TLS (optional).
             api_key: API key for authentication. When set, every RPC includes an
                      ``authorization: Bearer <key>`` metadata header.
-            batch_mode: Controls how ``enqueue()`` routes messages. Defaults to
-                        ``BatchMode.AUTO`` (opportunistic batching).
-            max_batch_size: Maximum number of messages per batch when using
-                            ``BatchMode.AUTO``. Defaults to 1000.
+            accumulator_mode: Controls how ``enqueue()`` routes messages.
+                              Defaults to ``AccumulatorMode.AUTO``
+                              (opportunistic accumulation).
+            max_accumulator_messages: Maximum number of messages per flush when
+                                     using ``AccumulatorMode.AUTO``.
+                                     Defaults to 1000.
         """
         self._tls = tls
         self._ca_cert = ca_cert
@@ -215,20 +226,20 @@ class Client:
         self._channel = self._make_channel(addr)
         self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
 
-        # Set up the batcher based on the chosen mode.
-        self._batcher: AutoBatcher | LingerBatcher | None = None
-        if isinstance(batch_mode, Linger):
-            self._batcher = LingerBatcher(
+        # Set up the accumulator based on the chosen mode.
+        self._accumulator: AutoAccumulator | LingerAccumulator | None = None
+        if isinstance(accumulator_mode, Linger):
+            self._accumulator = LingerAccumulator(
                 self._stub,
-                linger_ms=batch_mode.linger_ms,
-                batch_size=batch_mode.batch_size,
+                linger_ms=accumulator_mode.linger_ms,
+                max_messages=accumulator_mode.max_messages,
             )
-        elif batch_mode is BatchMode.AUTO:
-            self._batcher = AutoBatcher(
+        elif accumulator_mode is AccumulatorMode.AUTO:
+            self._accumulator = AutoAccumulator(
                 self._stub,
-                max_batch_size=max_batch_size,
+                max_messages=max_accumulator_messages,
             )
-        # BatchMode.DISABLED: self._batcher stays None
+        # AccumulatorMode.DISABLED: self._accumulator stays None
 
     def _make_channel(self, addr: str) -> grpc.Channel:
         """Create a gRPC channel to the given address using stored credentials."""
@@ -251,9 +262,9 @@ class Client:
         return channel
 
     def close(self) -> None:
-        """Drain pending batched messages and close the underlying gRPC channel."""
-        if self._batcher is not None:
-            self._batcher.close()
+        """Drain pending accumulated messages and close the underlying gRPC channel."""
+        if self._accumulator is not None:
+            self._accumulator.close()
         self._channel.close()
 
     def __enter__(self) -> Client:
@@ -270,12 +281,12 @@ class Client:
     ) -> str:
         """Enqueue a message to the specified queue.
 
-        When a batcher is active (``BatchMode.AUTO`` or ``Linger``), the
-        message is submitted to the background batcher and this call blocks
-        until the batch is flushed and the result is available.
+        When an accumulator is active (``AccumulatorMode.AUTO`` or ``Linger``),
+        the message is submitted to the background accumulator and this call
+        blocks until the flush completes and the result is available.
 
-        When batching is disabled (``BatchMode.DISABLED``), this call makes
-        a direct synchronous RPC.
+        When accumulation is disabled (``AccumulatorMode.DISABLED``), this call
+        makes a direct synchronous RPC.
 
         Args:
             queue: Target queue name.
@@ -287,40 +298,47 @@ class Client:
 
         Raises:
             QueueNotFoundError: If the queue does not exist (DISABLED mode).
-            BatchEnqueueError: If the batch RPC fails (AUTO/LINGER mode).
+            EnqueueError: If the enqueue RPC fails (AUTO/LINGER mode).
             RPCError: For unexpected gRPC failures.
         """
-        proto = service_pb2.EnqueueRequest(
+        proto = service_pb2.EnqueueMessage(
             queue=queue,
             headers=headers or {},
             payload=payload,
         )
 
-        if self._batcher is not None:
-            future = self._batcher.submit(proto)
+        if self._accumulator is not None:
+            future = self._accumulator.submit(proto)
             return future.result()
 
         # Direct RPC (DISABLED mode).
         try:
-            resp = self._stub.Enqueue(proto)
+            resp = self._stub.Enqueue(
+                service_pb2.EnqueueRequest(messages=[proto])
+            )
         except grpc.RpcError as e:
             raise _map_enqueue_error(e) from e
-        return str(resp.message_id)
 
-    def batch_enqueue(
+        result = resp.results[0]
+        which = result.WhichOneof("result")
+        if which == "message_id":
+            return str(result.message_id)
+        raise _map_enqueue_result_error(result.error.code, result.error.message)
+
+    def enqueue_many(
         self,
         messages: list[tuple[str, dict[str, str] | None, bytes]],
-    ) -> list[BatchEnqueueResult]:
+    ) -> list[EnqueueResult]:
         """Enqueue multiple messages in a single RPC.
 
-        This is an explicit batch operation that always uses the BatchEnqueue
-        RPC regardless of the batch_mode setting.
+        This is an explicit multi-message operation that always uses the
+        Enqueue RPC directly, regardless of the accumulator_mode setting.
 
         Args:
             messages: List of (queue, headers, payload) tuples.
 
         Returns:
-            List of ``BatchEnqueueResult`` objects, one per input message.
+            List of ``EnqueueResult`` objects, one per input message.
             Each result has either a ``message_id`` (success) or ``error``
             (per-message failure).
 
@@ -329,7 +347,7 @@ class Client:
             RPCError: For unexpected gRPC failures.
         """
         proto_messages = [
-            service_pb2.EnqueueRequest(
+            service_pb2.EnqueueMessage(
                 queue=q,
                 headers=h or {},
                 payload=p,
@@ -338,26 +356,13 @@ class Client:
         ]
 
         try:
-            resp = self._stub.BatchEnqueue(
-                service_pb2.BatchEnqueueRequest(messages=proto_messages)
+            resp = self._stub.Enqueue(
+                service_pb2.EnqueueRequest(messages=proto_messages)
             )
         except grpc.RpcError as e:
-            raise _map_batch_enqueue_error(e) from e
+            raise _map_enqueue_error(e) from e
 
-        results: list[BatchEnqueueResult] = []
-        for r in resp.results:
-            if r.HasField("success"):
-                results.append(
-                    BatchEnqueueResult(
-                        message_id=str(r.success.message_id),
-                        error=None,
-                    )
-                )
-            else:
-                results.append(
-                    BatchEnqueueResult(message_id=None, error=r.error)
-                )
-        return results
+        return [_proto_enqueue_result_to_sdk(r) for r in resp.results]
 
     def consume(self, queue: str) -> Iterator[ConsumeMessage]:
         """Open a streaming consumer on the specified queue.
@@ -398,8 +403,8 @@ class Client:
         self._channel.close()
         self._channel = self._make_channel(leader_addr)
         self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
-        if self._batcher is not None:
-            self._batcher.update_stub(self._stub)
+        if self._accumulator is not None:
+            self._accumulator.update_stub(self._stub)
         try:
             return self._stub.Consume(
                 service_pb2.ConsumeRequest(queue=queue)
@@ -411,25 +416,12 @@ class Client:
         self,
         stream: Any,
     ) -> Iterator[ConsumeMessage]:
-        """Internal generator reading from the gRPC stream.
-
-        Handles both singular ``message`` field (backward compatible) and
-        repeated ``messages`` field (batched delivery).
-        """
+        """Internal generator reading from the gRPC stream."""
         try:
             for resp in stream:
-                # Check batched messages first (repeated field).
-                if len(resp.messages) > 0:
-                    for msg in resp.messages:
-                        if msg is not None and msg.ByteSize():
-                            yield _proto_msg_to_consume_message(msg)
-                    continue
-
-                # Fall back to singular message field.
-                msg = resp.message
-                if msg is None or not msg.ByteSize():
-                    continue  # keepalive
-                yield _proto_msg_to_consume_message(msg)
+                for msg in resp.messages:
+                    if msg is not None and msg.ByteSize():
+                        yield _proto_msg_to_consume_message(msg)
         except grpc.RpcError:
             return
 
@@ -447,11 +439,25 @@ class Client:
             RPCError: For unexpected gRPC failures.
         """
         try:
-            self._stub.Ack(
-                service_pb2.AckRequest(queue=queue, message_id=msg_id)
+            resp = self._stub.Ack(
+                service_pb2.AckRequest(
+                    messages=[service_pb2.AckMessage(queue=queue, message_id=msg_id)]
+                )
             )
         except grpc.RpcError as e:
             raise _map_ack_error(e) from e
+
+        # Check per-message result for errors.
+        if resp.results:
+            result = resp.results[0]
+            which = result.WhichOneof("result")
+            if which == "error":
+                from fila.errors import MessageNotFoundError, RPCError as _RPCError
+
+                ack_err = result.error
+                if ack_err.code == service_pb2.ACK_ERROR_CODE_MESSAGE_NOT_FOUND:
+                    raise MessageNotFoundError(f"ack: {ack_err.message}")
+                raise _RPCError(grpc.StatusCode.INTERNAL, f"ack: {ack_err.message}")
 
     def nack(self, queue: str, msg_id: str, error: str) -> None:
         """Negatively acknowledge a message that failed processing.
@@ -469,10 +475,26 @@ class Client:
             RPCError: For unexpected gRPC failures.
         """
         try:
-            self._stub.Nack(
+            resp = self._stub.Nack(
                 service_pb2.NackRequest(
-                    queue=queue, message_id=msg_id, error=error
+                    messages=[
+                        service_pb2.NackMessage(
+                            queue=queue, message_id=msg_id, error=error
+                        )
+                    ]
                 )
             )
         except grpc.RpcError as e:
             raise _map_nack_error(e) from e
+
+        # Check per-message result for errors.
+        if resp.results:
+            result = resp.results[0]
+            which = result.WhichOneof("result")
+            if which == "error":
+                from fila.errors import MessageNotFoundError, RPCError as _RPCError
+
+                nack_err = result.error
+                if nack_err.code == service_pb2.NACK_ERROR_CODE_MESSAGE_NOT_FOUND:
+                    raise MessageNotFoundError(f"nack: {nack_err.message}")
+                raise _RPCError(grpc.StatusCode.INTERNAL, f"nack: {nack_err.message}")

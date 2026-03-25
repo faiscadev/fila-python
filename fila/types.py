@@ -19,8 +19,8 @@ class ConsumeMessage:
 
 
 @dataclass(frozen=True)
-class BatchEnqueueResult:
-    """Result for a single message within a batch enqueue operation.
+class EnqueueResult:
+    """Result for a single message within an enqueue operation.
 
     Exactly one of ``message_id`` or ``error`` is set.
     """
@@ -34,13 +34,13 @@ class BatchEnqueueResult:
         return self.message_id is not None
 
 
-class BatchMode(Enum):
+class AccumulatorMode(Enum):
     """Controls how ``enqueue()`` routes messages to the broker.
 
-    - ``AUTO``: Opportunistic batching via a background thread. At low load
+    - ``AUTO``: Opportunistic accumulation via a background thread. At low load
       messages are sent individually; at high load they cluster into batches.
       This is the default.
-    - ``DISABLED``: No batching. Each ``enqueue()`` call is a direct RPC.
+    - ``DISABLED``: No accumulation. Each ``enqueue()`` call is a direct RPC.
     """
 
     AUTO = auto()
@@ -49,15 +49,15 @@ class BatchMode(Enum):
 
 @dataclass(frozen=True)
 class Linger:
-    """Timer-based forced batching mode.
+    """Timer-based forced accumulation mode.
 
     Messages are held for up to ``linger_ms`` milliseconds or until
-    ``batch_size`` messages accumulate, whichever comes first.
+    ``max_messages`` messages accumulate, whichever comes first.
 
     Args:
         linger_ms: Maximum time to hold a message before flushing (milliseconds).
-        batch_size: Maximum number of messages per batch.
+        max_messages: Maximum number of messages per flush.
     """
 
     linger_ms: float
-    batch_size: int
+    max_messages: int
