@@ -5,7 +5,7 @@ from __future__ import annotations
 import queue
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import grpc
 

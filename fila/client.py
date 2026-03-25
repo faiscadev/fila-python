@@ -8,7 +8,8 @@ import grpc
 
 from fila.batcher import AutoAccumulator, LingerAccumulator
 from fila.errors import (
-    EnqueueError,
+    MessageNotFoundError,
+    RPCError,
     _map_ack_error,
     _map_consume_error,
     _map_enqueue_error,
@@ -452,12 +453,10 @@ class Client:
             result = resp.results[0]
             which = result.WhichOneof("result")
             if which == "error":
-                from fila.errors import MessageNotFoundError, RPCError as _RPCError
-
                 ack_err = result.error
                 if ack_err.code == service_pb2.ACK_ERROR_CODE_MESSAGE_NOT_FOUND:
                     raise MessageNotFoundError(f"ack: {ack_err.message}")
-                raise _RPCError(grpc.StatusCode.INTERNAL, f"ack: {ack_err.message}")
+                raise RPCError(grpc.StatusCode.INTERNAL, f"ack: {ack_err.message}")
 
     def nack(self, queue: str, msg_id: str, error: str) -> None:
         """Negatively acknowledge a message that failed processing.
@@ -492,9 +491,7 @@ class Client:
             result = resp.results[0]
             which = result.WhichOneof("result")
             if which == "error":
-                from fila.errors import MessageNotFoundError, RPCError as _RPCError
-
                 nack_err = result.error
                 if nack_err.code == service_pb2.NACK_ERROR_CODE_MESSAGE_NOT_FOUND:
                     raise MessageNotFoundError(f"nack: {nack_err.message}")
-                raise _RPCError(grpc.StatusCode.INTERNAL, f"nack: {nack_err.message}")
+                raise RPCError(grpc.StatusCode.INTERNAL, f"nack: {nack_err.message}")
