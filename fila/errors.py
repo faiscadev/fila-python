@@ -26,13 +26,29 @@ class RPCError(FilaError):
         super().__init__(f"rpc error (code = {code.name}): {message}")
 
 
-class BatchEnqueueError(FilaError):
-    """Raised when a batched enqueue fails at the RPC level.
+class EnqueueError(FilaError):
+    """Raised when an enqueue fails at the RPC level.
 
-    Individual per-message failures are reported via ``BatchEnqueueResult.error``
-    and do not raise this exception. This is raised only when the entire batch
+    Individual per-message failures are reported via ``EnqueueResult.error``
+    and do not raise this exception. This is raised only when the entire
     RPC fails (e.g., network error, server unavailable).
     """
+
+
+def _map_enqueue_result_error(code: int, message: str) -> FilaError:
+    """Map a per-message EnqueueErrorCode to a Fila exception.
+
+    Used when the unified Enqueue RPC succeeds at the transport level but
+    returns a per-message error result (e.g., queue not found for one of
+    the messages in the batch).
+    """
+    from fila.v1 import service_pb2
+
+    if code == service_pb2.ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND:
+        return QueueNotFoundError(f"enqueue: {message}")
+    if code == service_pb2.ENQUEUE_ERROR_CODE_PERMISSION_DENIED:
+        return RPCError(grpc.StatusCode.PERMISSION_DENIED, f"enqueue: {message}")
+    return EnqueueError(f"enqueue failed: {message}")
 
 
 def _map_enqueue_error(err: grpc.RpcError) -> FilaError:
@@ -64,12 +80,4 @@ def _map_nack_error(err: grpc.RpcError) -> FilaError:
     code = err.code()
     if code == grpc.StatusCode.NOT_FOUND:
         return MessageNotFoundError(f"nack: {err.details()}")
-    return RPCError(code, err.details() or "")
-
-
-def _map_batch_enqueue_error(err: grpc.RpcError) -> FilaError:
-    """Map a gRPC error from a batch enqueue call to a Fila exception."""
-    code = err.code()
-    if code == grpc.StatusCode.NOT_FOUND:
-        return QueueNotFoundError(f"batch_enqueue: {err.details()}")
     return RPCError(code, err.details() or "")

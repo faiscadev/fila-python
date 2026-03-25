@@ -3,21 +3,21 @@
 from fila.async_client import AsyncClient
 from fila.client import Client
 from fila.errors import (
-    BatchEnqueueError,
+    EnqueueError,
     FilaError,
     MessageNotFoundError,
     QueueNotFoundError,
     RPCError,
 )
-from fila.types import BatchEnqueueResult, BatchMode, ConsumeMessage, Linger
+from fila.types import AccumulatorMode, ConsumeMessage, EnqueueResult, Linger
 
 __all__ = [
+    "AccumulatorMode",
     "AsyncClient",
-    "BatchEnqueueError",
-    "BatchEnqueueResult",
-    "BatchMode",
     "Client",
     "ConsumeMessage",
+    "EnqueueError",
+    "EnqueueResult",
     "FilaError",
     "Linger",
     "MessageNotFoundError",

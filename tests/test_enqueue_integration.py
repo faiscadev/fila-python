@@ -1,4 +1,4 @@
-"""Integration tests for batch enqueue and smart batching.
+"""Integration tests for enqueue_many and accumulator modes.
 
 These tests require a running fila-server binary. They are skipped
 automatically when the server is not found (local dev).
@@ -11,21 +11,23 @@ import pytest
 import fila
 
 
-class TestBatchEnqueue:
-    """Integration tests for the explicit batch_enqueue method."""
+class TestEnqueueMany:
+    """Integration tests for the explicit enqueue_many method."""
 
-    def test_batch_enqueue_multiple_messages(self, server: object) -> None:
-        """batch_enqueue sends multiple messages in one RPC and returns per-message results."""
+    def test_enqueue_many_multiple_messages(self, server: object) -> None:
+        """enqueue_many sends multiple messages in one RPC and returns per-message results."""
         from tests.conftest import TestServer
 
         assert isinstance(server, TestServer)
-        server.create_queue("test-batch")
+        server.create_queue("test-enqueue-many")
 
-        with fila.Client(server.addr, batch_mode=fila.BatchMode.DISABLED) as client:
-            results = client.batch_enqueue([
-                ("test-batch", {"idx": "0"}, b"payload-0"),
-                ("test-batch", {"idx": "1"}, b"payload-1"),
-                ("test-batch", {"idx": "2"}, b"payload-2"),
+        with fila.Client(
+            server.addr, accumulator_mode=fila.AccumulatorMode.DISABLED
+        ) as client:
+            results = client.enqueue_many([
+                ("test-enqueue-many", {"idx": "0"}, b"payload-0"),
+                ("test-enqueue-many", {"idx": "1"}, b"payload-1"),
+                ("test-enqueue-many", {"idx": "2"}, b"payload-2"),
             ])
 
             assert len(results) == 3
@@ -38,60 +40,64 @@ class TestBatchEnqueue:
             ids = [r.message_id for r in results]
             assert len(set(ids)) == 3
 
-    def test_batch_enqueue_single_message(self, server: object) -> None:
-        """batch_enqueue works with a single message."""
+    def test_enqueue_many_single_message(self, server: object) -> None:
+        """enqueue_many works with a single message."""
         from tests.conftest import TestServer
 
         assert isinstance(server, TestServer)
-        server.create_queue("test-batch-single")
+        server.create_queue("test-enqueue-many-single")
 
-        with fila.Client(server.addr, batch_mode=fila.BatchMode.DISABLED) as client:
-            results = client.batch_enqueue([
-                ("test-batch-single", None, b"solo"),
+        with fila.Client(
+            server.addr, accumulator_mode=fila.AccumulatorMode.DISABLED
+        ) as client:
+            results = client.enqueue_many([
+                ("test-enqueue-many-single", None, b"solo"),
             ])
 
             assert len(results) == 1
             assert results[0].is_success
             assert results[0].message_id is not None
 
-    def test_batch_enqueue_consume_verify(self, server: object) -> None:
-        """Messages enqueued via batch_enqueue can be consumed and acked."""
+    def test_enqueue_many_consume_verify(self, server: object) -> None:
+        """Messages enqueued via enqueue_many can be consumed and acked."""
         from tests.conftest import TestServer
 
         assert isinstance(server, TestServer)
-        server.create_queue("test-batch-consume")
+        server.create_queue("test-enqueue-many-consume")
 
-        with fila.Client(server.addr, batch_mode=fila.BatchMode.DISABLED) as client:
-            results = client.batch_enqueue([
-                ("test-batch-consume", {"k": "v"}, b"batch-msg"),
+        with fila.Client(
+            server.addr, accumulator_mode=fila.AccumulatorMode.DISABLED
+        ) as client:
+            results = client.enqueue_many([
+                ("test-enqueue-many-consume", {"k": "v"}, b"multi-msg"),
             ])
             assert results[0].is_success
 
-            stream = client.consume("test-batch-consume")
+            stream = client.consume("test-enqueue-many-consume")
             msg = next(stream)
 
             assert msg.id == results[0].message_id
             assert msg.headers["k"] == "v"
-            assert msg.payload == b"batch-msg"
+            assert msg.payload == b"multi-msg"
 
-            client.ack("test-batch-consume", msg.id)
+            client.ack("test-enqueue-many-consume", msg.id)
 
 
-class TestAsyncBatchEnqueue:
-    """Integration tests for the async batch_enqueue method."""
+class TestAsyncEnqueueMany:
+    """Integration tests for the async enqueue_many method."""
 
     @pytest.mark.asyncio
-    async def test_async_batch_enqueue(self, server: object) -> None:
-        """Async batch_enqueue sends multiple messages."""
+    async def test_async_enqueue_many(self, server: object) -> None:
+        """Async enqueue_many sends multiple messages."""
         from tests.conftest import TestServer
 
         assert isinstance(server, TestServer)
-        server.create_queue("test-async-batch")
+        server.create_queue("test-async-enqueue-many")
 
         async with fila.AsyncClient(server.addr) as client:
-            results = await client.batch_enqueue([
-                ("test-async-batch", None, b"async-0"),
-                ("test-async-batch", None, b"async-1"),
+            results = await client.enqueue_many([
+                ("test-async-enqueue-many", None, b"async-0"),
+                ("test-async-enqueue-many", None, b"async-1"),
             ])
 
             assert len(results) == 2
@@ -100,26 +106,28 @@ class TestAsyncBatchEnqueue:
                 assert r.message_id is not None
 
 
-class TestSmartBatching:
-    """Integration tests for smart batching (BatchMode.AUTO)."""
+class TestAccumulatorModes:
+    """Integration tests for accumulator modes (AccumulatorMode.AUTO, Linger)."""
 
     def test_auto_mode_enqueue(self, server: object) -> None:
-        """AUTO mode enqueues messages through the batcher."""
+        """AUTO mode enqueues messages through the accumulator."""
         from tests.conftest import TestServer
 
         assert isinstance(server, TestServer)
-        server.create_queue("test-auto-batch")
+        server.create_queue("test-auto-accum")
 
-        with fila.Client(server.addr, batch_mode=fila.BatchMode.AUTO) as client:
-            msg_id = client.enqueue("test-auto-batch", None, b"auto-msg")
+        with fila.Client(
+            server.addr, accumulator_mode=fila.AccumulatorMode.AUTO
+        ) as client:
+            msg_id = client.enqueue("test-auto-accum", None, b"auto-msg")
             assert msg_id != ""
 
             # Verify the message was actually enqueued.
-            stream = client.consume("test-auto-batch")
+            stream = client.consume("test-auto-accum")
             msg = next(stream)
             assert msg.id == msg_id
             assert msg.payload == b"auto-msg"
-            client.ack("test-auto-batch", msg.id)
+            client.ack("test-auto-accum", msg.id)
 
     def test_auto_mode_multiple_messages(self, server: object) -> None:
         """AUTO mode handles multiple sequential enqueues."""
@@ -128,7 +136,9 @@ class TestSmartBatching:
         assert isinstance(server, TestServer)
         server.create_queue("test-auto-multi")
 
-        with fila.Client(server.addr, batch_mode=fila.BatchMode.AUTO) as client:
+        with fila.Client(
+            server.addr, accumulator_mode=fila.AccumulatorMode.AUTO
+        ) as client:
             ids = []
             for i in range(5):
                 msg_id = client.enqueue(
@@ -147,7 +157,9 @@ class TestSmartBatching:
         assert isinstance(server, TestServer)
         server.create_queue("test-disabled")
 
-        with fila.Client(server.addr, batch_mode=fila.BatchMode.DISABLED) as client:
+        with fila.Client(
+            server.addr, accumulator_mode=fila.AccumulatorMode.DISABLED
+        ) as client:
             msg_id = client.enqueue("test-disabled", None, b"direct")
             assert msg_id != ""
 
@@ -157,7 +169,7 @@ class TestSmartBatching:
             client.ack("test-disabled", msg.id)
 
     def test_linger_mode_enqueue(self, server: object) -> None:
-        """LINGER mode enqueues messages through a timer-based batcher."""
+        """LINGER mode enqueues messages through a timer-based accumulator."""
         from tests.conftest import TestServer
 
         assert isinstance(server, TestServer)
@@ -165,7 +177,7 @@ class TestSmartBatching:
 
         with fila.Client(
             server.addr,
-            batch_mode=fila.Linger(linger_ms=50, batch_size=10),
+            accumulator_mode=fila.Linger(linger_ms=50, max_messages=10),
         ) as client:
             msg_id = client.enqueue("test-linger", None, b"lingered")
             assert msg_id != ""
@@ -177,44 +189,44 @@ class TestSmartBatching:
             client.ack("test-linger", msg.id)
 
     def test_default_mode_is_auto(self, server: object) -> None:
-        """Client defaults to AUTO batch mode."""
+        """Client defaults to AUTO accumulator mode."""
         from tests.conftest import TestServer
 
         assert isinstance(server, TestServer)
         server.create_queue("test-default-mode")
 
-        # No batch_mode arg = AUTO.
+        # No accumulator_mode arg = AUTO.
         with fila.Client(server.addr) as client:
             msg_id = client.enqueue("test-default-mode", None, b"default")
             assert msg_id != ""
 
 
-class TestBatchModeTypes:
-    """Unit tests for BatchMode and Linger types (no server needed)."""
+class TestAccumulatorModeTypes:
+    """Unit tests for AccumulatorMode and Linger types (no server needed)."""
 
-    def test_batch_mode_enum(self) -> None:
-        """BatchMode has AUTO and DISABLED variants."""
-        assert fila.BatchMode.AUTO is not None
-        assert fila.BatchMode.DISABLED is not None
-        modes = {fila.BatchMode.AUTO, fila.BatchMode.DISABLED}
+    def test_accumulator_mode_enum(self) -> None:
+        """AccumulatorMode has AUTO and DISABLED variants."""
+        assert fila.AccumulatorMode.AUTO is not None
+        assert fila.AccumulatorMode.DISABLED is not None
+        modes = {fila.AccumulatorMode.AUTO, fila.AccumulatorMode.DISABLED}
         assert len(modes) == 2  # They are distinct values
 
     def test_linger_fields(self) -> None:
-        """Linger stores linger_ms and batch_size."""
-        linger = fila.Linger(linger_ms=100, batch_size=50)
+        """Linger stores linger_ms and max_messages."""
+        linger = fila.Linger(linger_ms=100, max_messages=50)
         assert linger.linger_ms == 100
-        assert linger.batch_size == 50
+        assert linger.max_messages == 50
 
-    def test_batch_enqueue_result_success(self) -> None:
-        """BatchEnqueueResult.is_success returns True when message_id is set."""
-        r = fila.BatchEnqueueResult(message_id="abc", error=None)
+    def test_enqueue_result_success(self) -> None:
+        """EnqueueResult.is_success returns True when message_id is set."""
+        r = fila.EnqueueResult(message_id="abc", error=None)
         assert r.is_success
         assert r.message_id == "abc"
         assert r.error is None
 
-    def test_batch_enqueue_result_error(self) -> None:
-        """BatchEnqueueResult.is_success returns False when error is set."""
-        r = fila.BatchEnqueueResult(message_id=None, error="queue not found")
+    def test_enqueue_result_error(self) -> None:
+        """EnqueueResult.is_success returns False when error is set."""
+        r = fila.EnqueueResult(message_id=None, error="queue not found")
         assert not r.is_success
         assert r.message_id is None
         assert r.error == "queue not found"
