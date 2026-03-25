@@ -27,11 +27,12 @@ class RPCError(FilaError):
 
 
 class EnqueueError(FilaError):
-    """Raised when an enqueue fails at the RPC level.
+    """Raised when an enqueue operation fails.
 
-    Individual per-message failures are reported via ``EnqueueResult.error``
-    and do not raise this exception. This is raised only when the entire
-    RPC fails (e.g., network error, server unavailable).
+    In ``enqueue_many()``, individual per-message failures are reported via
+    ``EnqueueResult.error`` and do not raise this exception. It is also used
+    as a fallback for per-message enqueue failures that do not map to a more
+    specific type (e.g., storage or Lua errors).
     """
 
 

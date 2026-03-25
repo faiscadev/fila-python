@@ -7,20 +7,22 @@ from typing import TYPE_CHECKING, Any
 import grpc
 import grpc.aio
 
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
 from fila.client import _proto_enqueue_result_to_sdk, _proto_msg_to_consume_message
 from fila.errors import (
-    EnqueueError,
+    MessageNotFoundError,
+    RPCError,
     _map_ack_error,
     _map_consume_error,
     _map_enqueue_error,
     _map_enqueue_result_error,
     _map_nack_error,
 )
-from fila.types import ConsumeMessage, EnqueueResult
 from fila.v1 import service_pb2, service_pb2_grpc
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from fila.types import ConsumeMessage, EnqueueResult
 
 
 class _AsyncClientCallDetails(
@@ -396,12 +398,10 @@ class AsyncClient:
             result = resp.results[0]
             which = result.WhichOneof("result")
             if which == "error":
-                from fila.errors import MessageNotFoundError, RPCError as _RPCError
-
                 ack_err = result.error
                 if ack_err.code == service_pb2.ACK_ERROR_CODE_MESSAGE_NOT_FOUND:
                     raise MessageNotFoundError(f"ack: {ack_err.message}")
-                raise _RPCError(grpc.StatusCode.INTERNAL, f"ack: {ack_err.message}")
+                raise RPCError(grpc.StatusCode.INTERNAL, f"ack: {ack_err.message}")
 
     async def nack(self, queue: str, msg_id: str, error: str) -> None:
         """Negatively acknowledge a message that failed processing.
@@ -436,9 +436,7 @@ class AsyncClient:
             result = resp.results[0]
             which = result.WhichOneof("result")
             if which == "error":
-                from fila.errors import MessageNotFoundError, RPCError as _RPCError
-
                 nack_err = result.error
                 if nack_err.code == service_pb2.NACK_ERROR_CODE_MESSAGE_NOT_FOUND:
                     raise MessageNotFoundError(f"nack: {nack_err.message}")
-                raise _RPCError(grpc.StatusCode.INTERNAL, f"nack: {nack_err.message}")
+                raise RPCError(grpc.StatusCode.INTERNAL, f"nack: {nack_err.message}")

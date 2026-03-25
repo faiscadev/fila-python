@@ -5,7 +5,6 @@ These tests use mock stubs and do not require a running fila-server.
 
 from __future__ import annotations
 
-import threading
 from concurrent.futures import Future
 from typing import Any
 from unittest.mock import MagicMock
@@ -65,6 +64,9 @@ class TestFlushSingle:
 
         assert fut.result(timeout=1.0) == "msg-001"
         stub.Enqueue.assert_called_once()
+        sent_req = stub.Enqueue.call_args.args[0]
+        assert len(sent_req.messages) == 1
+        assert sent_req.messages[0] == proto
 
     def test_rpc_error(self) -> None:
         import grpc
