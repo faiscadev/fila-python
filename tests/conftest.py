@@ -12,13 +12,12 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import grpc
 import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-from fila.v1 import admin_pb2, admin_pb2_grpc
+from fila.v1 import admin_pb2
 
 FILA_SERVER_BIN = os.environ.get(
     "FILA_SERVER_BIN",
@@ -169,93 +168,43 @@ class TestServer:
         self._process.wait()
         shutil.rmtree(self._data_dir, ignore_errors=True)
 
-    def _make_grpc_channel(self) -> grpc.Channel:
-        """Create a gRPC channel to this server (TLS-aware) for admin ops."""
+    def create_queue(self, name: str) -> None:
+        """Create a queue on the test server via FIBP admin op."""
+        from fila.fibp import (
+            OP_CREATE_QUEUE,
+            FibpConnection,
+            encode_admin,
+            make_ssl_context,
+            parse_addr,
+        )
+
+        host, port = parse_addr(self.addr)
+        ssl_ctx = None
         if self.tls_paths is not None:
             with open(self.tls_paths["ca_cert"], "rb") as f:
-                ca = f.read()
+                ca_cert = f.read()
             with open(self.tls_paths["client_cert"], "rb") as f:
-                cert = f.read()
+                client_cert = f.read()
             with open(self.tls_paths["client_key"], "rb") as f:
-                key = f.read()
-            creds = grpc.ssl_channel_credentials(
-                root_certificates=ca,
-                private_key=key,
-                certificate_chain=cert,
+                client_key = f.read()
+            ssl_ctx = make_ssl_context(
+                ca_cert=ca_cert,
+                client_cert=client_cert,
+                client_key=client_key,
             )
-            channel = grpc.secure_channel(self.addr, creds)
-        else:
-            channel = grpc.insecure_channel(self.addr)
 
-        if self.api_key is not None:
-            # Inject API key via metadata interceptor for admin calls.
-            channel = grpc.intercept_channel(channel, _GrpcApiKeyInterceptor(self.api_key))
-
-        return channel
-
-    def create_queue(self, name: str) -> None:
-        """Create a queue on the test server via admin gRPC."""
-        channel = self._make_grpc_channel()
-        stub = admin_pb2_grpc.FilaAdminStub(channel)
-        stub.CreateQueue(
-            admin_pb2.CreateQueueRequest(
+        conn = FibpConnection(host, port, ssl_ctx=ssl_ctx, api_key=self.api_key)
+        try:
+            corr_id = conn.alloc_corr_id()
+            proto_body = admin_pb2.CreateQueueRequest(
                 name=name,
                 config=admin_pb2.QueueConfig(),
-            )
-        )
-        channel.close()
-
-
-class _GrpcClientCallDetails(grpc.ClientCallDetails):  # type: ignore[misc]
-    """Minimal concrete ClientCallDetails for the API key interceptor."""
-
-    def __init__(
-        self,
-        method: str,
-        timeout: float | None,
-        metadata: list[tuple[str, str | bytes]] | None,
-        credentials: grpc.CallCredentials | None,
-        wait_for_ready: bool | None,
-        compression: grpc.Compression | None,
-    ) -> None:
-        self.method = method
-        self.timeout = timeout
-        self.metadata = metadata
-        self.credentials = credentials
-        self.wait_for_ready = wait_for_ready
-        self.compression = compression
-
-
-class _GrpcApiKeyInterceptor(
-    grpc.UnaryUnaryClientInterceptor,  # type: ignore[misc]
-    grpc.UnaryStreamClientInterceptor,  # type: ignore[misc]
-):
-    """Injects authorization metadata into gRPC admin calls (test fixture only)."""
-
-    def __init__(self, api_key: str) -> None:
-        self._metadata = (("authorization", f"Bearer {api_key}"),)
-
-    def _inject(self, details: grpc.ClientCallDetails) -> _GrpcClientCallDetails:
-        metadata = list(details.metadata or [])
-        metadata.extend(self._metadata)
-        return _GrpcClientCallDetails(
-            details.method,
-            details.timeout,
-            metadata,
-            details.credentials,
-            details.wait_for_ready,
-            details.compression,
-        )
-
-    def intercept_unary_unary(  # type: ignore[override]
-        self, continuation: object, details: grpc.ClientCallDetails, request: object
-    ) -> object:
-        return continuation(self._inject(details), request)  # type: ignore[call-arg]
-
-    def intercept_unary_stream(  # type: ignore[override]
-        self, continuation: object, details: grpc.ClientCallDetails, request: object
-    ) -> object:
-        return continuation(self._inject(details), request)  # type: ignore[call-arg]
+            ).SerializeToString()
+            frame = encode_admin(OP_CREATE_QUEUE, corr_id, proto_body)
+            fut = conn.send_request(frame, corr_id)
+            fut.result(timeout=10.0)
+        finally:
+            conn.close()
 
 
 @pytest.fixture()
@@ -318,9 +267,9 @@ def tls_server() -> Generator[TestServer, None, None]:
             f'listen_addr = "{addr}"\n'
             f'\n'
             f'[tls]\n'
-            f'ca_cert = "{tls_paths["ca_cert"]}"\n'
-            f'server_cert = "{tls_paths["server_cert"]}"\n'
-            f'server_key = "{tls_paths["server_key"]}"\n'
+            f'ca_file = "{tls_paths["ca_cert"]}"\n'
+            f'cert_file = "{tls_paths["server_cert"]}"\n'
+            f'key_file = "{tls_paths["server_key"]}"\n'
         )
 
     env = {**os.environ, "FILA_DATA_DIR": os.path.join(data_dir, "db")}
@@ -372,6 +321,8 @@ def auth_server() -> Generator[TestServer, None, None]:
         f.write(
             f'[fibp]\n'
             f'listen_addr = "{addr}"\n'
+            f'\n'
+            f'[auth]\n'
             f'bootstrap_apikey = "{bootstrap_key}"\n'
         )
 

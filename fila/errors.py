@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fila.fibp import (
+    ERR_AUTH_REQUIRED,
     ERR_INTERNAL,
     ERR_MESSAGE_NOT_FOUND,
     ERR_PERMISSION_DENIED,
@@ -79,4 +80,6 @@ def _map_fibp_error(code: int, message: str) -> FilaError:
         return QueueNotFoundError(message)
     if code == ERR_MESSAGE_NOT_FOUND:
         return MessageNotFoundError(message)
+    if code in (ERR_AUTH_REQUIRED, ERR_PERMISSION_DENIED):
+        return TransportError(code, message)
     return TransportError(code, message)

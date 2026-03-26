@@ -177,8 +177,12 @@ def encode_nack(corr_id: int, items: list[tuple[str, str, str]]) -> bytes:
 
 
 def encode_auth(corr_id: int, api_key: str) -> bytes:
-    """Encode an AUTH frame carrying the API key."""
-    return _encode_frame(0, OP_AUTH, corr_id, _encode_str(api_key))
+    """Encode an AUTH frame carrying the API key.
+
+    The server expects the raw UTF-8 bytes of the key as the payload —
+    no u16 length prefix (unlike most string fields in this protocol).
+    """
+    return _encode_frame(0, OP_AUTH, corr_id, api_key.encode())
 
 
 def encode_admin(op: int, corr_id: int, proto_body: bytes) -> bytes:
@@ -221,37 +225,47 @@ def decode_enqueue_response(body: bytes) -> list[tuple[bool, str, int, str]]:
     return results
 
 
-def decode_consume_message(body: bytes) -> tuple[str, str, dict[str, str], bytes, str, int]:
-    """Decode a single server-pushed consume frame body.
+def decode_consume_push(
+    body: bytes,
+) -> list[tuple[str, dict[str, str], bytes, str, int]]:
+    """Decode a server-pushed consume frame body (batch format).
 
-    Returns ``(msg_id, queue, headers, payload, fairness_key, attempt_count)``.
+    Returns a list of ``(msg_id, headers, payload, fairness_key, attempt_count)``
+    tuples.  The queue name is *not* included in the push frame — callers must
+    supply it from the subscribe context.
 
-    The consume push wire format is::
+    The server wire format is::
 
-        msg_id_len:u16 | msg_id
-        queue_len:u16 | queue
-        fairness_key_len:u16 | fairness_key
-        attempt_count:u32
-        header_count:u8 | (key_len:u16 key val_len:u16 val)...
-        payload_len:u32 | payload
+        msg_count:u16
+        for each message:
+            msg_id_len:u16   | msg_id
+            fairness_key:u16 | fairness_key
+            attempt_count:u32
+            header_count:u8  | (key_len:u16 key val_len:u16 val)...
+            payload_len:u32  | payload
     """
     offset = 0
-    msg_id, offset = _decode_str(body, offset)
-    queue, offset = _decode_str(body, offset)
-    fairness_key, offset = _decode_str(body, offset)
-    (attempt_count,) = struct.unpack_from(">I", body, offset)
-    offset += 4
-    (header_count,) = struct.unpack_from(">B", body, offset)
-    offset += 1
-    headers: dict[str, str] = {}
-    for _ in range(header_count):
-        k, offset = _decode_str(body, offset)
-        v, offset = _decode_str(body, offset)
-        headers[k] = v
-    (payload_len,) = struct.unpack_from(">I", body, offset)
-    offset += 4
-    payload = body[offset: offset + payload_len]
-    return msg_id, queue, headers, payload, fairness_key, attempt_count
+    (count,) = struct.unpack_from(">H", body, offset)
+    offset += 2
+    results: list[tuple[str, dict[str, str], bytes, str, int]] = []
+    for _ in range(count):
+        msg_id, offset = _decode_str(body, offset)
+        fairness_key, offset = _decode_str(body, offset)
+        (attempt_count,) = struct.unpack_from(">I", body, offset)
+        offset += 4
+        (header_count,) = struct.unpack_from(">B", body, offset)
+        offset += 1
+        headers: dict[str, str] = {}
+        for _ in range(header_count):
+            k, offset = _decode_str(body, offset)
+            v, offset = _decode_str(body, offset)
+            headers[k] = v
+        (payload_len,) = struct.unpack_from(">I", body, offset)
+        offset += 4
+        payload = body[offset: offset + payload_len]
+        offset += payload_len
+        results.append((msg_id, headers, payload, fairness_key, attempt_count))
+    return results
 
 
 def decode_ack_nack_response(body: bytes) -> list[tuple[bool, int, str]]:
@@ -276,10 +290,28 @@ def decode_ack_nack_response(body: bytes) -> list[tuple[bool, int, str]]:
 
 
 def decode_error_frame(body: bytes) -> tuple[int, str]:
-    """Decode a 0xFE ERROR frame body.  Returns ``(error_code, message)``."""
-    (code,) = struct.unpack_from(">H", body, 0)
-    msg, _ = _decode_str(body, 2)
-    return code, msg
+    """Decode a 0xFE ERROR frame body.  Returns ``(error_code, message)``.
+
+    The server encodes error frames as raw UTF-8 message bytes with no code
+    prefix.  This function infers the error code from the message content so
+    that callers can perform type-safe error handling.
+    """
+    msg = body.decode(errors="replace")
+    # Infer the error code from well-known message prefixes.
+    lower = msg.lower()
+    if "queue" in lower and "not found" in lower:
+        return ERR_QUEUE_NOT_FOUND, msg
+    if "message" in lower and "not found" in lower:
+        return ERR_MESSAGE_NOT_FOUND, msg
+    if "permission denied" in lower or "does not have" in lower:
+        return ERR_PERMISSION_DENIED, msg
+    if (
+        "authentication required" in lower
+        or "invalid or missing api key" in lower
+        or "auth" in lower
+    ):
+        return ERR_AUTH_REQUIRED, msg
+    return ERR_INTERNAL, msg
 
 
 # ------------------------------------------------------------------
@@ -416,10 +448,18 @@ class FibpConnection:
         return fut
 
     def open_consume_stream(self, frame: bytes, corr_id: int) -> _ConsumeQueue:
-        """Register a consume queue, send *frame*, and return the queue."""
+        """Register a consume queue, send *frame*, and return the queue.
+
+        The server sends push frames with correlation_id=0 (FLAG_STREAM set),
+        so the queue is registered under both the original corr_id (to absorb
+        the initial stream-accepted ack) and 0 (to receive pushed messages).
+        Only one consume stream per connection is supported.
+        """
         cq = _ConsumeQueue()
         with self._lock:
             self._consume_queues[corr_id] = cq
+            # Push frames always arrive with corr_id=0.
+            self._consume_queues[0] = cq
         with self._send_lock:
             self._sock.sendall(frame)
         return cq
@@ -487,15 +527,12 @@ class FibpConnection:
         # Resolve a pending future.
         with self._lock:
             fut: Future[bytes] | None = self._pending.pop(corr_id, None)
-            # Also check if this is the "end of consume stream" signal
-            # (op == OP_CONSUME response with no push flag).
-            cq = self._consume_queues.get(corr_id)
 
-        if cq is not None and op == OP_CONSUME:
-            # Server closed the consume stream.
-            cq.close()
-            with self._lock:
-                self._consume_queues.pop(corr_id, None)
+        # A non-push OP_CONSUME frame with an empty body is the server's
+        # "stream accepted" acknowledgment.  The consume queue was already
+        # registered under corr_id=0 in open_consume_stream, so there is
+        # nothing to do here — just discard the ack frame.
+        if op == OP_CONSUME and not body:
             return
 
         if fut is not None and not fut.done():
@@ -612,11 +649,19 @@ class AsyncFibpConnection:
     async def open_consume_stream(
         self, frame: bytes, corr_id: int
     ) -> asyncio.Queue[bytes | None]:
-        """Send *frame* and return a queue that receives pushed bodies."""
+        """Send *frame* and return a queue that receives pushed bodies.
+
+        The server sends push frames with correlation_id=0 (FLAG_STREAM set),
+        so the queue is registered under both the original corr_id (to absorb
+        the initial stream-accepted ack) and 0 (to receive pushed messages).
+        Only one consume stream per connection is supported.
+        """
         assert self._write_lock is not None
         assert self._writer is not None
         q: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._consume_queues[corr_id] = q
+        # Push frames always arrive with corr_id=0.
+        self._consume_queues[0] = q
         async with self._write_lock:
             self._writer.write(frame)
             await self._writer.drain()
@@ -655,10 +700,11 @@ class AsyncFibpConnection:
             self._wake_all(FibpError(0, "server sent GOAWAY"))
             return
 
-        # End of consume stream (server sends a non-push CONSUME frame to close).
-        if op == OP_CONSUME and corr_id in self._consume_queues:
-            q = self._consume_queues.pop(corr_id)
-            q.put_nowait(None)
+        # A non-push OP_CONSUME frame with an empty body is the server's
+        # "stream accepted" acknowledgment.  The consume queue was already
+        # registered under corr_id=0 in open_consume_stream, so there is
+        # nothing to do here — just discard the ack frame.
+        if op == OP_CONSUME and not body:
             return
 
         fut = self._pending.pop(corr_id, None)

@@ -19,7 +19,7 @@ from fila.batcher import (
     _flush_many,
     _flush_single,
 )
-from fila.errors import EnqueueError, QueueNotFoundError
+from fila.errors import QueueNotFoundError, TransportError
 from fila.fibp import (
     ERR_QUEUE_NOT_FOUND,
     FibpError,
@@ -149,7 +149,7 @@ class TestFlushMany:
         _flush_many(conn, items)
 
         for item in items:
-            with pytest.raises(EnqueueError):
+            with pytest.raises(TransportError):
                 item.future.result(timeout=1.0)
 
     def test_multi_queue_batch_sends_per_queue_frames(self) -> None:
