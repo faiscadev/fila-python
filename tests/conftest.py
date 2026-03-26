@@ -169,8 +169,8 @@ class TestServer:
         self._process.wait()
         shutil.rmtree(self._data_dir, ignore_errors=True)
 
-    def _make_channel(self) -> grpc.Channel:
-        """Create a gRPC channel to this server (TLS-aware)."""
+    def _make_grpc_channel(self) -> grpc.Channel:
+        """Create a gRPC channel to this server (TLS-aware) for admin ops."""
         if self.tls_paths is not None:
             with open(self.tls_paths["ca_cert"], "rb") as f:
                 ca = f.read()
@@ -188,14 +188,14 @@ class TestServer:
             channel = grpc.insecure_channel(self.addr)
 
         if self.api_key is not None:
-            from fila.client import _ApiKeyInterceptor
-            channel = grpc.intercept_channel(channel, _ApiKeyInterceptor(self.api_key))
+            # Inject API key via metadata interceptor for admin calls.
+            channel = grpc.intercept_channel(channel, _GrpcApiKeyInterceptor(self.api_key))
 
         return channel
 
     def create_queue(self, name: str) -> None:
         """Create a queue on the test server via admin gRPC."""
-        channel = self._make_channel()
+        channel = self._make_grpc_channel()
         stub = admin_pb2_grpc.FilaAdminStub(channel)
         stub.CreateQueue(
             admin_pb2.CreateQueueRequest(
@@ -204,6 +204,58 @@ class TestServer:
             )
         )
         channel.close()
+
+
+class _GrpcClientCallDetails(grpc.ClientCallDetails):  # type: ignore[misc]
+    """Minimal concrete ClientCallDetails for the API key interceptor."""
+
+    def __init__(
+        self,
+        method: str,
+        timeout: float | None,
+        metadata: list[tuple[str, str | bytes]] | None,
+        credentials: grpc.CallCredentials | None,
+        wait_for_ready: bool | None,
+        compression: grpc.Compression | None,
+    ) -> None:
+        self.method = method
+        self.timeout = timeout
+        self.metadata = metadata
+        self.credentials = credentials
+        self.wait_for_ready = wait_for_ready
+        self.compression = compression
+
+
+class _GrpcApiKeyInterceptor(
+    grpc.UnaryUnaryClientInterceptor,  # type: ignore[misc]
+    grpc.UnaryStreamClientInterceptor,  # type: ignore[misc]
+):
+    """Injects authorization metadata into gRPC admin calls (test fixture only)."""
+
+    def __init__(self, api_key: str) -> None:
+        self._metadata = (("authorization", f"Bearer {api_key}"),)
+
+    def _inject(self, details: grpc.ClientCallDetails) -> _GrpcClientCallDetails:
+        metadata = list(details.metadata or [])
+        metadata.extend(self._metadata)
+        return _GrpcClientCallDetails(
+            details.method,
+            details.timeout,
+            metadata,
+            details.credentials,
+            details.wait_for_ready,
+            details.compression,
+        )
+
+    def intercept_unary_unary(  # type: ignore[override]
+        self, continuation: object, details: grpc.ClientCallDetails, request: object
+    ) -> object:
+        return continuation(self._inject(details), request)  # type: ignore[call-arg]
+
+    def intercept_unary_stream(  # type: ignore[override]
+        self, continuation: object, details: grpc.ClientCallDetails, request: object
+    ) -> object:
+        return continuation(self._inject(details), request)  # type: ignore[call-arg]
 
 
 @pytest.fixture()
@@ -233,21 +285,8 @@ def server() -> Generator[TestServer, None, None]:
 
     ts = TestServer(addr, process, data_dir)
 
-    # Wait for server to be ready.
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        channel = grpc.insecure_channel(addr)
-        try:
-            stub = admin_pb2_grpc.FilaAdminStub(channel)
-            stub.ListQueues(admin_pb2.ListQueuesRequest())
-            channel.close()
-            break
-        except grpc.RpcError:
-            channel.close()
-            time.sleep(0.05)
-    else:
-        ts.stop()
-        pytest.fail("fila-server did not become ready within 10s")
+    # Wait for server to be ready via FIBP handshake.
+    _wait_fibp_ready(addr, ts)
 
     yield ts
 
@@ -295,21 +334,20 @@ def tls_server() -> Generator[TestServer, None, None]:
 
     ts = TestServer(addr, process, data_dir, tls_paths=tls_paths)
 
-    # Wait for server to be ready (use TLS channel).
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        channel = ts._make_channel()
-        try:
-            stub = admin_pb2_grpc.FilaAdminStub(channel)
-            stub.ListQueues(admin_pb2.ListQueuesRequest())
-            channel.close()
-            break
-        except grpc.RpcError:
-            channel.close()
-            time.sleep(0.05)
-    else:
-        ts.stop()
-        pytest.fail("TLS fila-server did not become ready within 10s")
+    with open(tls_paths["ca_cert"], "rb") as f:
+        ca_cert = f.read()
+    with open(tls_paths["client_cert"], "rb") as f:
+        client_cert = f.read()
+    with open(tls_paths["client_key"], "rb") as f:
+        client_key = f.read()
+
+    _wait_fibp_ready(
+        addr,
+        ts,
+        ca_cert=ca_cert,
+        client_cert=client_cert,
+        client_key=client_key,
+    )
 
     yield ts
 
@@ -348,22 +386,47 @@ def auth_server() -> Generator[TestServer, None, None]:
 
     ts = TestServer(addr, process, data_dir, api_key=bootstrap_key)
 
-    # Wait for server to be ready.
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        channel = ts._make_channel()
-        try:
-            stub = admin_pb2_grpc.FilaAdminStub(channel)
-            stub.ListQueues(admin_pb2.ListQueuesRequest())
-            channel.close()
-            break
-        except grpc.RpcError:
-            channel.close()
-            time.sleep(0.05)
-    else:
-        ts.stop()
-        pytest.fail("auth fila-server did not become ready within 10s")
+    _wait_fibp_ready(addr, ts, api_key=bootstrap_key)
 
     yield ts
 
     ts.stop()
+
+
+def _wait_fibp_ready(
+    addr: str,
+    ts: TestServer,
+    *,
+    ca_cert: bytes | None = None,
+    client_cert: bytes | None = None,
+    client_key: bytes | None = None,
+    api_key: str | None = None,
+    timeout: float = 10.0,
+) -> None:
+    """Poll the server with a FIBP handshake until it responds or times out."""
+    from fila.fibp import FibpConnection, FibpError, make_ssl_context, parse_addr
+
+    host, port = parse_addr(addr)
+    ssl_ctx = None
+    if ca_cert is not None:
+        ssl_ctx = make_ssl_context(
+            ca_cert=ca_cert,
+            client_cert=client_cert,
+            client_key=client_key,
+        )
+
+    deadline = time.monotonic() + timeout
+    last_exc: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            conn = FibpConnection(host, port, ssl_ctx=ssl_ctx, api_key=api_key)
+            conn.close()
+            return
+        except (OSError, FibpError) as e:
+            last_exc = e
+            time.sleep(0.05)
+
+    ts.stop()
+    pytest.fail(
+        f"fila-server at {addr} did not become ready within {timeout}s: {last_exc}"
+    )
