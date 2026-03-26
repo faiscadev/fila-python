@@ -8,6 +8,7 @@ from fila.errors import (
     MessageNotFoundError,
     QueueNotFoundError,
     RPCError,
+    TransportError,
 )
 from fila.types import AccumulatorMode, ConsumeMessage, EnqueueResult, Linger
 
@@ -23,4 +24,5 @@ __all__ = [
     "MessageNotFoundError",
     "QueueNotFoundError",
     "RPCError",
+    "TransportError",
 ]

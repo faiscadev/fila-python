@@ -10,12 +10,12 @@ readme = "README.md"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.10"
 dependencies = [
-    "grpcio>=1.60.0",
     "protobuf>=4.25.0",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "grpcio>=1.60.0",
     "grpcio-tools>=1.60.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -47,6 +47,10 @@ ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = "grpc.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "cryptography.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

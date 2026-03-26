@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-import grpc
+from fila.fibp import (
+    ERR_INTERNAL,
+    ERR_MESSAGE_NOT_FOUND,
+    ERR_PERMISSION_DENIED,
+    ERR_QUEUE_NOT_FOUND,
+)
 
 
 class FilaError(Exception):
@@ -17,68 +22,61 @@ class MessageNotFoundError(FilaError):
     """Raised when the specified message does not exist."""
 
 
-class RPCError(FilaError):
-    """Raised for unexpected gRPC failures, preserving status code and message."""
+class TransportError(FilaError):
+    """Raised for unexpected FIBP transport failures, preserving error code and message."""
 
-    def __init__(self, code: grpc.StatusCode, message: str) -> None:
+    def __init__(self, code: int, message: str) -> None:
         self.code = code
         self.message = message
-        super().__init__(f"rpc error (code = {code.name}): {message}")
+        super().__init__(f"transport error (code={code}): {message}")
+
+
+# Keep RPCError as an alias so existing code that catches it still works.
+# New code should use TransportError.
+RPCError = TransportError
 
 
 class EnqueueError(FilaError):
-    """Raised when an enqueue operation fails.
+    """Raised when an enqueue operation fails at the batch or item level.
 
-    In ``enqueue_many()``, individual per-message failures are reported via
-    ``EnqueueResult.error`` and do not raise this exception. It is also used
+    In ``enqueue_many()``, per-message failures are reported via
+    ``EnqueueResult.error`` and do not raise this exception.  It is also used
     as a fallback for per-message enqueue failures that do not map to a more
     specific type (e.g., storage or Lua errors).
     """
 
 
-def _map_enqueue_result_error(code: int, message: str) -> FilaError:
-    """Map a per-message EnqueueErrorCode to a Fila exception.
-
-    Used when the unified Enqueue RPC succeeds at the transport level but
-    returns a per-message error result (e.g., queue not found for one of
-    the messages in the batch).
-    """
-    from fila.v1 import service_pb2
-
-    if code == service_pb2.ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND:
+def _map_enqueue_error_code(code: int, message: str) -> FilaError:
+    """Map a FIBP enqueue error code to a Fila exception."""
+    if code == ERR_QUEUE_NOT_FOUND:
         return QueueNotFoundError(f"enqueue: {message}")
-    if code == service_pb2.ENQUEUE_ERROR_CODE_PERMISSION_DENIED:
-        return RPCError(grpc.StatusCode.PERMISSION_DENIED, f"enqueue: {message}")
+    if code == ERR_PERMISSION_DENIED:
+        return TransportError(code, f"enqueue: {message}")
     return EnqueueError(f"enqueue failed: {message}")
 
 
-def _map_enqueue_error(err: grpc.RpcError) -> FilaError:
-    """Map a gRPC error from an enqueue call to a Fila exception."""
-    code = err.code()
-    if code == grpc.StatusCode.NOT_FOUND:
-        return QueueNotFoundError(f"enqueue: {err.details()}")
-    return RPCError(code, err.details() or "")
+def _map_ack_error_code(code: int, message: str) -> FilaError:
+    """Map a FIBP ack error code to a Fila exception."""
+    if code == ERR_MESSAGE_NOT_FOUND:
+        return MessageNotFoundError(f"ack: {message}")
+    if code == ERR_PERMISSION_DENIED:
+        return TransportError(code, f"ack: {message}")
+    return TransportError(ERR_INTERNAL, f"ack: {message}")
 
 
-def _map_consume_error(err: grpc.RpcError) -> FilaError:
-    """Map a gRPC error from a consume call to a Fila exception."""
-    code = err.code()
-    if code == grpc.StatusCode.NOT_FOUND:
-        return QueueNotFoundError(f"consume: {err.details()}")
-    return RPCError(code, err.details() or "")
+def _map_nack_error_code(code: int, message: str) -> FilaError:
+    """Map a FIBP nack error code to a Fila exception."""
+    if code == ERR_MESSAGE_NOT_FOUND:
+        return MessageNotFoundError(f"nack: {message}")
+    if code == ERR_PERMISSION_DENIED:
+        return TransportError(code, f"nack: {message}")
+    return TransportError(ERR_INTERNAL, f"nack: {message}")
 
 
-def _map_ack_error(err: grpc.RpcError) -> FilaError:
-    """Map a gRPC error from an ack call to a Fila exception."""
-    code = err.code()
-    if code == grpc.StatusCode.NOT_FOUND:
-        return MessageNotFoundError(f"ack: {err.details()}")
-    return RPCError(code, err.details() or "")
-
-
-def _map_nack_error(err: grpc.RpcError) -> FilaError:
-    """Map a gRPC error from a nack call to a Fila exception."""
-    code = err.code()
-    if code == grpc.StatusCode.NOT_FOUND:
-        return MessageNotFoundError(f"nack: {err.details()}")
-    return RPCError(code, err.details() or "")
+def _map_fibp_error(code: int, message: str) -> FilaError:
+    """Map a generic FIBP ERROR frame to a Fila exception."""
+    if code == ERR_QUEUE_NOT_FOUND:
+        return QueueNotFoundError(message)
+    if code == ERR_MESSAGE_NOT_FOUND:
+        return MessageNotFoundError(message)
+    return TransportError(code, message)

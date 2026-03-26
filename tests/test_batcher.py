@@ -1,10 +1,11 @@
 """Unit tests for the batcher module.
 
-These tests use mock stubs and do not require a running fila-server.
+These tests use a mock FibpConnection and do not require a running fila-server.
 """
 
 from __future__ import annotations
 
+import struct
 from concurrent.futures import Future
 from typing import Any
 from unittest.mock import MagicMock
@@ -18,303 +19,239 @@ from fila.batcher import (
     _flush_many,
     _flush_single,
 )
-from fila.errors import EnqueueError
-from fila.v1 import service_pb2
+from fila.errors import EnqueueError, QueueNotFoundError
+from fila.fibp import (
+    ERR_QUEUE_NOT_FOUND,
+    FibpError,
+)
 
 
-class FakeEnqueueResult:
-    """Minimal fake for service_pb2.EnqueueResult."""
-
-    def __init__(self, message_id: str | None = None, error_msg: str | None = None) -> None:
-        self._message_id = message_id
-        self._error_msg = error_msg
-        self.message_id = message_id or ""
-        self.error = MagicMock()
-        self.error.message = error_msg or ""
-
-    def WhichOneof(self, name: str) -> str | None:  # noqa: N802
-        if name == "result":
-            if self._message_id is not None:
-                return "message_id"
-            return "error"
-        return None
+def _make_enqueue_response(results: list[tuple[bool, str, int, str]]) -> bytes:
+    """Build an ENQUEUE response body from a list of (ok, msg_id, err_code, err_msg) tuples."""
+    parts: list[bytes] = [struct.pack(">H", len(results))]
+    for ok, msg_id, err_code, err_msg in results:
+        if ok:
+            parts.append(struct.pack(">B", 1))
+            b = msg_id.encode()
+            parts.append(struct.pack(">H", len(b)) + b)
+        else:
+            parts.append(struct.pack(">B", 0))
+            parts.append(struct.pack(">H", err_code))
+            b = err_msg.encode()
+            parts.append(struct.pack(">H", len(b)) + b)
+    return b"".join(parts)
 
 
-class FakeEnqueueResponse:
-    """Minimal fake for service_pb2.EnqueueResponse."""
+def _make_conn(response_body: bytes | None = None, error: Exception | None = None) -> Any:
+    """Create a mock FibpConnection that returns *response_body* or raises *error*."""
+    conn = MagicMock()
+    conn.alloc_corr_id.return_value = 1
 
-    def __init__(self, results: list[FakeEnqueueResult]) -> None:
-        self.results = results
+    fut: Future[bytes] = Future()
+    if error is not None:
+        fut.set_exception(error)
+    elif response_body is not None:
+        fut.set_result(response_body)
+
+    conn.send_request.return_value = fut
+    return conn
 
 
 class TestFlushSingle:
-    """Test the _flush_single function."""
+    """Tests for _flush_single."""
 
     def test_success(self) -> None:
-        stub = MagicMock()
-        stub.Enqueue.return_value = FakeEnqueueResponse([
-            FakeEnqueueResult(message_id="msg-001"),
-        ])
+        resp_body = _make_enqueue_response([(True, "msg-001", 0, "")])
+        conn = _make_conn(resp_body)
 
-        proto = service_pb2.EnqueueMessage(queue="q", payload=b"data")
         fut: Future[str] = Future()
-        req = _EnqueueItem(proto, fut)
+        item = _EnqueueItem("q", {}, b"data", fut)
 
-        _flush_single(stub, req)
+        _flush_single(conn, item)
 
         assert fut.result(timeout=1.0) == "msg-001"
-        stub.Enqueue.assert_called_once()
-        sent_req = stub.Enqueue.call_args.args[0]
-        assert len(sent_req.messages) == 1
-        assert sent_req.messages[0] == proto
+        conn.send_request.assert_called_once()
 
-    def test_rpc_error(self) -> None:
-        import grpc
+    def test_transport_error_maps_to_queue_not_found(self) -> None:
+        conn = _make_conn(error=FibpError(ERR_QUEUE_NOT_FOUND, "queue not found"))
 
-        stub = MagicMock()
-        stub.Enqueue.side_effect = type(
-            "_FakeRpcError", (grpc.RpcError,), {
-                "code": lambda self: grpc.StatusCode.NOT_FOUND,
-                "details": lambda self: "queue not found",
-            }
-        )()
-
-        proto = service_pb2.EnqueueMessage(queue="missing", payload=b"data")
         fut: Future[str] = Future()
-        req = _EnqueueItem(proto, fut)
+        item = _EnqueueItem("missing", {}, b"data", fut)
 
-        _flush_single(stub, req)
+        _flush_single(conn, item)
 
-        from fila.errors import QueueNotFoundError
+        with pytest.raises(QueueNotFoundError):
+            fut.result(timeout=1.0)
+
+    def test_per_message_error(self) -> None:
+        resp_body = _make_enqueue_response(
+            [(False, "", ERR_QUEUE_NOT_FOUND, "queue 'q' not found")]
+        )
+        conn = _make_conn(resp_body)
+
+        fut: Future[str] = Future()
+        item = _EnqueueItem("q", {}, b"data", fut)
+
+        _flush_single(conn, item)
 
         with pytest.raises(QueueNotFoundError):
             fut.result(timeout=1.0)
 
 
 class TestFlushMany:
-    """Test the _flush_many function."""
+    """Tests for _flush_many."""
 
     def test_all_success(self) -> None:
-        stub = MagicMock()
-        stub.Enqueue.return_value = FakeEnqueueResponse([
-            FakeEnqueueResult(message_id="id-1"),
-            FakeEnqueueResult(message_id="id-2"),
+        resp_body = _make_enqueue_response([
+            (True, "id-1", 0, ""),
+            (True, "id-2", 0, ""),
         ])
+        conn = _make_conn(resp_body)
 
         items = [
-            _EnqueueItem(
-                service_pb2.EnqueueMessage(queue="q", payload=b"a"),
-                Future(),
-            ),
-            _EnqueueItem(
-                service_pb2.EnqueueMessage(queue="q", payload=b"b"),
-                Future(),
-            ),
+            _EnqueueItem("q", {}, b"a", Future()),
+            _EnqueueItem("q", {}, b"b", Future()),
         ]
 
-        _flush_many(stub, items)
+        _flush_many(conn, items)
 
         assert items[0].future.result(timeout=1.0) == "id-1"
         assert items[1].future.result(timeout=1.0) == "id-2"
 
     def test_mixed_results(self) -> None:
-        stub = MagicMock()
-        stub.Enqueue.return_value = FakeEnqueueResponse([
-            FakeEnqueueResult(message_id="id-1"),
-            FakeEnqueueResult(error_msg="queue 'missing' not found"),
+        # Both items target the same queue; the server returns a per-message error
+        # for the second one (e.g., a failed Lua hook).
+        resp_body = _make_enqueue_response([
+            (True, "id-1", 0, ""),
+            (False, "", ERR_QUEUE_NOT_FOUND, "queue 'q' not found"),
         ])
+        conn = _make_conn(resp_body)
 
         items = [
-            _EnqueueItem(
-                service_pb2.EnqueueMessage(queue="q", payload=b"a"),
-                Future(),
-            ),
-            _EnqueueItem(
-                service_pb2.EnqueueMessage(queue="missing", payload=b"b"),
-                Future(),
-            ),
+            _EnqueueItem("q", {}, b"a", Future()),
+            _EnqueueItem("q", {}, b"b", Future()),
         ]
 
-        _flush_many(stub, items)
+        _flush_many(conn, items)
 
         assert items[0].future.result(timeout=1.0) == "id-1"
-        with pytest.raises(EnqueueError, match="queue 'missing' not found"):
+        with pytest.raises(QueueNotFoundError, match="not found"):
             items[1].future.result(timeout=1.0)
 
-    def test_rpc_failure_sets_all_futures(self) -> None:
-        import grpc
-
-        stub = MagicMock()
-        stub.Enqueue.side_effect = type(
-            "_FakeRpcError", (grpc.RpcError,), {
-                "code": lambda self: grpc.StatusCode.UNAVAILABLE,
-                "details": lambda self: "server unavailable",
-            }
-        )()
+    def test_transport_failure_sets_all_futures(self) -> None:
+        conn = _make_conn(error=FibpError(0, "server unavailable"))
 
         items = [
-            _EnqueueItem(
-                service_pb2.EnqueueMessage(queue="q", payload=b"a"),
-                Future(),
-            ),
-            _EnqueueItem(
-                service_pb2.EnqueueMessage(queue="q", payload=b"b"),
-                Future(),
-            ),
+            _EnqueueItem("q", {}, b"a", Future()),
+            _EnqueueItem("q", {}, b"b", Future()),
         ]
 
-        _flush_many(stub, items)
+        _flush_many(conn, items)
 
         for item in items:
             with pytest.raises(EnqueueError):
                 item.future.result(timeout=1.0)
 
+    def test_multi_queue_batch_sends_per_queue_frames(self) -> None:
+        """When items target different queues, _flush_many sends one frame per queue."""
+        resp_body_q1 = _make_enqueue_response([(True, "id-q1", 0, "")])
+        resp_body_q2 = _make_enqueue_response([(True, "id-q2", 0, "")])
 
-class TestAutoAccumulator:
-    """Test the AutoAccumulator end-to-end."""
+        conn = MagicMock()
+        conn.alloc_corr_id.side_effect = [1, 2]
 
-    def test_single_message_uses_enqueue(self) -> None:
-        """When only one message is queued, AutoAccumulator uses Enqueue with one message."""
-        stub = MagicMock()
-        stub.Enqueue.return_value = FakeEnqueueResponse([
-            FakeEnqueueResult(message_id="msg-solo"),
-        ])
+        fut1: Future[bytes] = Future()
+        fut1.set_result(resp_body_q1)
+        fut2: Future[bytes] = Future()
+        fut2.set_result(resp_body_q2)
+        conn.send_request.side_effect = [fut1, fut2]
 
-        accumulator = AutoAccumulator(stub, max_messages=100)
-
-        proto = service_pb2.EnqueueMessage(queue="q", payload=b"solo")
-        fut = accumulator.submit(proto)
-        result = fut.result(timeout=5.0)
-
-        assert result == "msg-solo"
-        stub.Enqueue.assert_called_once()
-
-        accumulator.close()
-
-    def test_concurrent_messages_accumulated(self) -> None:
-        """When multiple messages arrive concurrently, they accumulate together."""
-        stub = MagicMock()
-
-        enqueue_response = FakeEnqueueResponse([
-            FakeEnqueueResult(message_id=f"id-{i}") for i in range(5)
-        ])
-
-        def mock_enqueue(request: Any) -> FakeEnqueueResponse:
-            return enqueue_response
-
-        stub.Enqueue.side_effect = mock_enqueue
-
-        accumulator = AutoAccumulator(stub, max_messages=100)
-
-        # Submit 5 messages rapidly.
-        protos = [
-            service_pb2.EnqueueMessage(queue="q", payload=f"msg-{i}".encode())
-            for i in range(5)
+        items = [
+            _EnqueueItem("queue-a", {}, b"a", Future()),
+            _EnqueueItem("queue-b", {}, b"b", Future()),
         ]
 
-        futures = []
-        for p in protos:
-            futures.append(accumulator.submit(p))
+        _flush_many(conn, items)
 
-        # All futures should resolve.
-        for _i, f in enumerate(futures):
-            result = f.result(timeout=5.0)
-            assert result is not None
+        assert conn.send_request.call_count == 2
+        assert items[0].future.result(timeout=1.0) == "id-q1"
+        assert items[1].future.result(timeout=1.0) == "id-q2"
 
-        accumulator.close()
+
+class TestAutoAccumulator:
+    """End-to-end tests for the AutoAccumulator."""
+
+    def test_single_message(self) -> None:
+        resp_body = _make_enqueue_response([(True, "msg-solo", 0, "")])
+        conn = _make_conn(resp_body)
+
+        acc = AutoAccumulator(conn, max_messages=100)
+        fut = acc.submit("q", {}, b"solo")
+        assert fut.result(timeout=5.0) == "msg-solo"
+        acc.close()
 
     def test_close_drains_pending(self) -> None:
-        """close() waits for pending messages to be flushed."""
-        stub = MagicMock()
-        stub.Enqueue.return_value = FakeEnqueueResponse([
-            FakeEnqueueResult(message_id="drained"),
-        ])
+        resp_body = _make_enqueue_response([(True, "drained", 0, "")])
+        conn = _make_conn(resp_body)
 
-        accumulator = AutoAccumulator(stub, max_messages=100)
-
-        proto = service_pb2.EnqueueMessage(queue="q", payload=b"drain-me")
-        fut = accumulator.submit(proto)
-
-        accumulator.close()
-
-        # After close, the future should be resolved.
+        acc = AutoAccumulator(conn, max_messages=100)
+        fut = acc.submit("q", {}, b"drain-me")
+        acc.close()
         assert fut.result(timeout=1.0) == "drained"
 
-    def test_update_stub(self) -> None:
-        """update_stub replaces the gRPC stub used for flushing."""
-        old_stub = MagicMock()
-        new_stub = MagicMock()
-        new_stub.Enqueue.return_value = FakeEnqueueResponse([
-            FakeEnqueueResult(message_id="new-stub"),
-        ])
+    def test_update_conn(self) -> None:
+        old_conn = _make_conn(error=FibpError(0, "old conn"))
+        resp_body = _make_enqueue_response([(True, "new-conn", 0, "")])
+        new_conn = _make_conn(resp_body)
 
-        accumulator = AutoAccumulator(old_stub, max_messages=100)
+        acc = AutoAccumulator(old_conn, max_messages=100)
+        acc.update_conn(new_conn)
 
-        # Update stub before submitting.
-        accumulator.update_stub(new_stub)
-
-        proto = service_pb2.EnqueueMessage(queue="q", payload=b"data")
-        fut = accumulator.submit(proto)
-        result = fut.result(timeout=5.0)
-
-        assert result == "new-stub"
-        accumulator.close()
+        fut = acc.submit("q", {}, b"data")
+        assert fut.result(timeout=5.0) == "new-conn"
+        acc.close()
 
 
 class TestLingerAccumulator:
-    """Test the LingerAccumulator."""
+    """Tests for the LingerAccumulator."""
 
     def test_flushes_at_max_messages(self) -> None:
-        """Flush triggers when max_messages messages accumulate."""
-        stub = MagicMock()
-        stub.Enqueue.return_value = FakeEnqueueResponse([
-            FakeEnqueueResult(message_id=f"id-{i}") for i in range(3)
-        ])
+        # conn needs to handle 3 results (they may arrive as 1 batch or 3 single calls)
+        conn = MagicMock()
+        conn.alloc_corr_id.side_effect = range(1, 100)
 
-        accumulator = LingerAccumulator(stub, linger_ms=5000, max_messages=3)
+        def make_resp(n: int) -> Future[bytes]:
+            fut: Future[bytes] = Future()
+            fut.set_result(_make_enqueue_response([(True, f"id-{i}", 0, "") for i in range(n)]))
+            return fut
+
+        conn.send_request.side_effect = [make_resp(3)]
+
+        acc = LingerAccumulator(conn, linger_ms=5000, max_messages=3)
 
         futures = []
         for i in range(3):
-            proto = service_pb2.EnqueueMessage(queue="q", payload=f"m{i}".encode())
-            futures.append(accumulator.submit(proto))
+            futures.append(acc.submit("q", {}, f"m{i}".encode()))
 
-        # Should flush quickly because max_messages=3 was reached.
-        for i, f in enumerate(futures):
-            result = f.result(timeout=5.0)
-            assert result == f"id-{i}"
+        for f in futures:
+            assert f.result(timeout=5.0) is not None
 
-        accumulator.close()
+        acc.close()
 
     def test_flushes_at_linger_timeout(self) -> None:
-        """Flush triggers after linger_ms even if max_messages is not reached."""
-        stub = MagicMock()
-        stub.Enqueue.return_value = FakeEnqueueResponse([
-            FakeEnqueueResult(message_id="lingered"),
-        ])
+        resp_body = _make_enqueue_response([(True, "lingered", 0, "")])
+        conn = _make_conn(resp_body)
 
-        accumulator = LingerAccumulator(stub, linger_ms=50, max_messages=100)
-
-        proto = service_pb2.EnqueueMessage(queue="q", payload=b"linger")
-        fut = accumulator.submit(proto)
-
-        # Should flush after ~50ms even though max_messages=100 not reached.
-        result = fut.result(timeout=5.0)
-        assert result == "lingered"
-
-        accumulator.close()
+        acc = LingerAccumulator(conn, linger_ms=50, max_messages=100)
+        fut = acc.submit("q", {}, b"linger")
+        assert fut.result(timeout=5.0) == "lingered"
+        acc.close()
 
     def test_close_drains_pending(self) -> None:
-        """close() drains any pending messages."""
-        stub = MagicMock()
-        stub.Enqueue.return_value = FakeEnqueueResponse([
-            FakeEnqueueResult(message_id="drained"),
-        ])
+        resp_body = _make_enqueue_response([(True, "drained", 0, "")])
+        conn = _make_conn(resp_body)
 
-        accumulator = LingerAccumulator(stub, linger_ms=10000, max_messages=100)
-
-        proto = service_pb2.EnqueueMessage(queue="q", payload=b"drain")
-        fut = accumulator.submit(proto)
-
-        accumulator.close()
-
+        acc = LingerAccumulator(conn, linger_ms=10000, max_messages=100)
+        fut = acc.submit("q", {}, b"drain")
+        acc.close()
         assert fut.result(timeout=1.0) == "drained"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 import fila
+from fila.fibp import ERR_AUTH_REQUIRED, ERR_PERMISSION_DENIED
 
 
 class TestSyncClient:
@@ -201,8 +202,6 @@ class TestApiKeyAuth:
 
     def test_missing_api_key_rejected(self, auth_server: object) -> None:
         """Requests without API key are rejected when auth is enabled."""
-        import grpc
-
         from tests.conftest import TestServer
 
         assert isinstance(auth_server, TestServer)
@@ -213,9 +212,10 @@ class TestApiKeyAuth:
         with fila.Client(auth_server.addr) as probe:
             try:
                 probe.enqueue("__auth_probe__", None, b"probe")
-            except fila.RPCError as e:
-                if e.code != grpc.StatusCode.UNAUTHENTICATED:
-                    pytest.fail(f"unexpected RPC error during auth probe: {e.code}")
+            except fila.TransportError as e:
+                # Auth required (ERR_AUTH_REQUIRED) or permission denied is expected.
+                if e.code not in (ERR_AUTH_REQUIRED, ERR_PERMISSION_DENIED):
+                    pytest.fail(f"unexpected transport error during auth probe: {e.code}")
             except fila.QueueNotFoundError:
                 pytest.skip("server does not enforce API key auth")
             else:
@@ -223,9 +223,9 @@ class TestApiKeyAuth:
 
         # If we reach here, the server enforces auth.
         with fila.Client(auth_server.addr) as client:
-            with pytest.raises(fila.RPCError) as exc_info:
+            with pytest.raises(fila.TransportError) as exc_info:
                 client.enqueue("test-auth", None, b"no-key")
-            assert exc_info.value.code == grpc.StatusCode.UNAUTHENTICATED
+            assert exc_info.value.code in (ERR_AUTH_REQUIRED, ERR_PERMISSION_DENIED)
 
     @pytest.mark.asyncio
     async def test_async_api_key_enqueue(self, auth_server: object) -> None:
