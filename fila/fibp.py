@@ -340,6 +340,7 @@ class FibpConnection:
         self._api_key = api_key
 
         self._lock = threading.Lock()
+        self._send_lock = threading.Lock()
         self._next_corr_id: int = 1
         # corr_id → Future[bytes] for request/response ops
         self._pending: dict[int, Future[bytes]] = {}
@@ -410,7 +411,8 @@ class FibpConnection:
         fut: Future[bytes] = Future()
         with self._lock:
             self._pending[corr_id] = fut
-        self._sock.sendall(frame)
+        with self._send_lock:
+            self._sock.sendall(frame)
         return fut
 
     def open_consume_stream(self, frame: bytes, corr_id: int) -> _ConsumeQueue:
@@ -418,7 +420,8 @@ class FibpConnection:
         cq = _ConsumeQueue()
         with self._lock:
             self._consume_queues[corr_id] = cq
-        self._sock.sendall(frame)
+        with self._send_lock:
+            self._sock.sendall(frame)
         return cq
 
     def alloc_corr_id(self) -> int:
@@ -704,14 +707,8 @@ def make_ssl_context(
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
     if ca_cert is not None:
-        # Write CA cert to a temp file (SSLContext only accepts file paths).
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as f:
-            f.write(ca_cert)
-            ca_path = f.name
-        try:
-            ctx.load_verify_locations(ca_path)
-        finally:
-            os.unlink(ca_path)
+        # Pass PEM bytes directly via cadata to avoid writing a temp file.
+        ctx.load_verify_locations(cadata=ca_cert.decode())
     else:
         ctx.load_default_certs()
 

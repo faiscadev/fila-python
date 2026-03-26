@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from fila.errors import (
@@ -28,6 +29,8 @@ from fila.types import ConsumeMessage, EnqueueResult
 if TYPE_CHECKING:
     import ssl
     from collections.abc import AsyncIterator
+
+_log = logging.getLogger(__name__)
 
 
 class AsyncClient:
@@ -175,6 +178,8 @@ class AsyncClient:
     ) -> list[EnqueueResult]:
         """Enqueue multiple messages, possibly targeting different queues.
 
+        Per-queue FIBP requests are issued concurrently via ``asyncio.gather``.
+
         Args:
             messages: List of ``(queue, headers, payload)`` tuples.
 
@@ -184,6 +189,7 @@ class AsyncClient:
         Raises:
             TransportError: For unexpected FIBP failures.
         """
+        import asyncio
         from collections import defaultdict
 
         by_queue: dict[str, list[tuple[int, dict[str, str], bytes]]] = defaultdict(list)
@@ -196,8 +202,10 @@ class AsyncClient:
             by_queue[queue].append((idx, hdrs or {}, payload))
             order.append((queue, idx))
 
-        results_by_queue: dict[str, list[EnqueueResult]] = {}
-        for queue_name, items in by_queue.items():
+        async def _send_one_queue(
+            queue_name: str,
+            items: list[tuple[int, dict[str, str], bytes]],
+        ) -> tuple[str, list[EnqueueResult]]:
             corr_id = self._conn.alloc_corr_id()
             msgs = [(queue_name, h, p) for _, h, p in items]
             frame = encode_enqueue(corr_id, msgs)
@@ -205,10 +213,9 @@ class AsyncClient:
                 body = await self._conn.send_request(frame, corr_id)
             except FibpError as e:
                 err = str(e)
-                results_by_queue[queue_name] = [
+                return queue_name, [
                     EnqueueResult(message_id=None, error=err) for _ in items
                 ]
-                continue
             decoded = decode_enqueue_response(body)
             per_queue: list[EnqueueResult] = []
             for ok, msg_id, _err_code, err_msg in decoded:
@@ -216,7 +223,14 @@ class AsyncClient:
                     per_queue.append(EnqueueResult(message_id=msg_id, error=None))
                 else:
                     per_queue.append(EnqueueResult(message_id=None, error=err_msg))
-            results_by_queue[queue_name] = per_queue
+            return queue_name, per_queue
+
+        coros = [
+            _send_one_queue(queue_name, items)
+            for queue_name, items in by_queue.items()
+        ]
+        gathered = await asyncio.gather(*coros)
+        results_by_queue: dict[str, list[EnqueueResult]] = dict(gathered)
 
         per_queue_counters: dict[str, int] = defaultdict(int)
         final: list[EnqueueResult] = []
@@ -263,6 +277,10 @@ class AsyncClient:
                     decode_consume_message(body)
                 )
             except Exception:
+                _log.warning(
+                    "failed to decode consume message; skipping frame",
+                    exc_info=True,
+                )
                 continue
             yield ConsumeMessage(
                 id=msg_id,
