@@ -19,7 +19,7 @@ from fila.batcher import (
     _flush_many,
     _flush_single,
 )
-from fila.errors import EnqueueError, QueueNotFoundError, TransportError
+from fila.errors import QueueNotFoundError, TransportError
 from fila.fibp import (
     ERR_QUEUE_NOT_FOUND,
     FibpError,

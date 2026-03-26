@@ -298,13 +298,18 @@ def decode_error_frame(body: bytes) -> tuple[int, str]:
     """
     msg = body.decode(errors="replace")
     # Infer the error code from well-known message prefixes.
-    if "queue" in msg.lower() and "not found" in msg.lower():
+    lower = msg.lower()
+    if "queue" in lower and "not found" in lower:
         return ERR_QUEUE_NOT_FOUND, msg
-    if "message" in msg.lower() and "not found" in msg.lower():
+    if "message" in lower and "not found" in lower:
         return ERR_MESSAGE_NOT_FOUND, msg
-    if "permission denied" in msg.lower() or "does not have" in msg.lower():
+    if "permission denied" in lower or "does not have" in lower:
         return ERR_PERMISSION_DENIED, msg
-    if "authentication required" in msg.lower() or "invalid or missing api key" in msg.lower() or "auth" in msg.lower():
+    if (
+        "authentication required" in lower
+        or "invalid or missing api key" in lower
+        or "auth" in lower
+    ):
         return ERR_AUTH_REQUIRED, msg
     return ERR_INTERNAL, msg
 

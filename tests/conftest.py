@@ -171,8 +171,8 @@ class TestServer:
     def create_queue(self, name: str) -> None:
         """Create a queue on the test server via FIBP admin op."""
         from fila.fibp import (
-            FibpConnection,
             OP_CREATE_QUEUE,
+            FibpConnection,
             encode_admin,
             make_ssl_context,
             parse_addr,
