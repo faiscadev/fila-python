@@ -7,7 +7,7 @@ import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-from fila.errors import _map_enqueue_error_code
+from fila.errors import _map_enqueue_error_code, _map_fibp_error
 from fila.fibp import (
     FibpError,
     decode_enqueue_response,
@@ -59,7 +59,7 @@ def _flush_single(
         else:
             item.future.set_exception(_map_enqueue_error_code(err_code, err_msg))
     except FibpError as e:
-        item.future.set_exception(_map_enqueue_error_code(e.code, e.message))
+        item.future.set_exception(_map_fibp_error(e.code, e.message))
     except Exception as e:
         item.future.set_exception(e)
 
@@ -99,7 +99,7 @@ def _flush_queue_batch(
     try:
         body = conn.send_request(frame, corr_id).result()
     except FibpError as e:
-        err = _map_enqueue_error_code(e.code, e.message)
+        err = _map_fibp_error(e.code, e.message)
         for item in items:
             item.future.set_exception(err)
         return

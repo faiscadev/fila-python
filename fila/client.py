@@ -16,7 +16,7 @@ from fila.fibp import (
     FibpConnection,
     FibpError,
     decode_ack_nack_response,
-    decode_consume_message,
+    decode_consume_push,
     decode_enqueue_response,
     encode_ack,
     encode_consume,
@@ -296,9 +296,9 @@ class Client:
         except FibpError as e:
             raise _map_fibp_error(e.code, e.message) from e
 
-        return self._consume_iter(cq)
+        return self._consume_iter(cq, queue)
 
-    def _consume_iter(self, cq: object) -> Iterator[ConsumeMessage]:
+    def _consume_iter(self, cq: object, queue: str) -> Iterator[ConsumeMessage]:
         from fila.fibp import _ConsumeQueue
         assert isinstance(cq, _ConsumeQueue)
         while True:
@@ -306,23 +306,22 @@ class Client:
             if body is None:
                 return
             try:
-                msg_id, queue, headers, payload, fairness_key, attempt_count = (
-                    decode_consume_message(body)
-                )
+                messages = decode_consume_push(body)
             except Exception:
                 _log.warning(
-                    "failed to decode consume message; skipping frame",
+                    "failed to decode consume push frame; skipping",
                     exc_info=True,
                 )
                 continue
-            yield ConsumeMessage(
-                id=msg_id,
-                headers=headers,
-                payload=payload,
-                fairness_key=fairness_key,
-                attempt_count=attempt_count,
-                queue=queue,
-            )
+            for msg_id, headers, payload, fairness_key, attempt_count in messages:
+                yield ConsumeMessage(
+                    id=msg_id,
+                    headers=headers,
+                    payload=payload,
+                    fairness_key=fairness_key,
+                    attempt_count=attempt_count,
+                    queue=queue,
+                )
 
     def ack(self, queue: str, msg_id: str) -> None:
         """Acknowledge a successfully processed message.
