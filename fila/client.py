@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from fila.batcher import AutoAccumulator, LingerAccumulator
@@ -29,6 +30,8 @@ from fila.types import AccumulatorMode, ConsumeMessage, EnqueueResult, Linger
 if TYPE_CHECKING:
     import ssl
     from collections.abc import Iterator
+
+_log = logging.getLogger(__name__)
 
 
 class Client:
@@ -276,9 +279,6 @@ class Client:
         Yields messages as they become available.  The iterator ends when the
         server closes the stream.
 
-        If the server returns a leader-hint error, the client transparently
-        reconnects to the leader address and retries once.
-
         Args:
             queue: Queue to consume from.
 
@@ -310,6 +310,10 @@ class Client:
                     decode_consume_message(body)
                 )
             except Exception:
+                _log.warning(
+                    "failed to decode consume message; skipping frame",
+                    exc_info=True,
+                )
                 continue
             yield ConsumeMessage(
                 id=msg_id,
