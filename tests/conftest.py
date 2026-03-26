@@ -272,7 +272,7 @@ def server() -> Generator[TestServer, None, None]:
     # Write config file for the server.
     config_path = os.path.join(data_dir, "fila.toml")
     with open(config_path, "w") as f:
-        f.write(f'[server]\nlisten_addr = "{addr}"\n')
+        f.write(f'[fibp]\nlisten_addr = "{addr}"\n')
 
     env = {**os.environ, "FILA_DATA_DIR": os.path.join(data_dir, "db")}
     process = subprocess.Popen(
@@ -314,7 +314,7 @@ def tls_server() -> Generator[TestServer, None, None]:
     config_path = os.path.join(data_dir, "fila.toml")
     with open(config_path, "w") as f:
         f.write(
-            f'[server]\n'
+            f'[fibp]\n'
             f'listen_addr = "{addr}"\n'
             f'\n'
             f'[tls]\n'
@@ -370,7 +370,7 @@ def auth_server() -> Generator[TestServer, None, None]:
     config_path = os.path.join(data_dir, "fila.toml")
     with open(config_path, "w") as f:
         f.write(
-            f'[server]\n'
+            f'[fibp]\n'
             f'listen_addr = "{addr}"\n'
             f'bootstrap_apikey = "{bootstrap_key}"\n'
         )
