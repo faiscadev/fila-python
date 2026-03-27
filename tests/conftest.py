@@ -17,7 +17,7 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-from fila.v1 import admin_pb2
+import struct
 
 FILA_SERVER_BIN = os.environ.get(
     "FILA_SERVER_BIN",
@@ -169,11 +169,11 @@ class TestServer:
         shutil.rmtree(self._data_dir, ignore_errors=True)
 
     def create_queue(self, name: str) -> None:
-        """Create a queue on the test server via FIBP admin op."""
+        """Create a queue on the test server via FIBP admin op (binary encoding)."""
         from fila.fibp import (
             OP_CREATE_QUEUE,
             FibpConnection,
-            encode_admin,
+            _encode_frame,
             make_ssl_context,
             parse_addr,
         )
@@ -196,11 +196,18 @@ class TestServer:
         conn = FibpConnection(host, port, ssl_ctx=ssl_ctx, api_key=self.api_key)
         try:
             corr_id = conn.alloc_corr_id()
-            proto_body = admin_pb2.CreateQueueRequest(
-                name=name,
-                config=admin_pb2.QueueConfig(),
-            ).SerializeToString()
-            frame = encode_admin(OP_CREATE_QUEUE, corr_id, proto_body)
+            # Binary wire format: queue_len:u16 + queue:utf8
+            #   + on_enqueue_len:u16 + on_enqueue:utf8
+            #   + on_failure_len:u16 + on_failure:utf8
+            #   + visibility_timeout_ms:u32
+            name_b = name.encode()
+            body = (
+                struct.pack(">H", len(name_b)) + name_b
+                + struct.pack(">H", 0)  # on_enqueue: empty
+                + struct.pack(">H", 0)  # on_failure: empty
+                + struct.pack(">I", 0)  # visibility_timeout_ms: 0
+            )
+            frame = _encode_frame(0, OP_CREATE_QUEUE, corr_id, body)
             fut = conn.send_request(frame, corr_id)
             fut.result(timeout=10.0)
         finally:
