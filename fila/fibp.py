@@ -19,7 +19,7 @@ Op codes
 Hot path (binary body):
   0x01 ENQUEUE, 0x02 CONSUME, 0x03 ACK, 0x04 NACK
 
-Admin (protobuf body):
+Admin (binary body):
   0x10 CREATE_QUEUE, 0x11 DELETE_QUEUE, 0x12 QUEUE_STATS,
   0x13 LIST_QUEUES,  0x14 REDRIVE,  0x15 CONFIG_SET, 0x16 CONFIG_GET, 0x17 CONFIG_LIST
 
@@ -184,11 +184,6 @@ def encode_auth(corr_id: int, api_key: str) -> bytes:
     no u16 length prefix (unlike most string fields in this protocol).
     """
     return _encode_frame(0, OP_AUTH, corr_id, api_key.encode())
-
-
-def encode_admin(op: int, corr_id: int, proto_body: bytes) -> bytes:
-    """Encode an admin frame with a protobuf-serialised body."""
-    return _encode_frame(0, op, corr_id, proto_body)
 
 
 # ------------------------------------------------------------------
