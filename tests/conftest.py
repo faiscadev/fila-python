@@ -12,13 +12,11 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import grpc
 import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-from fila.v1 import admin_pb2, admin_pb2_grpc
 
 FILA_SERVER_BIN = os.environ.get(
     "FILA_SERVER_BIN",
@@ -169,41 +167,43 @@ class TestServer:
         self._process.wait()
         shutil.rmtree(self._data_dir, ignore_errors=True)
 
-    def _make_channel(self) -> grpc.Channel:
-        """Create a gRPC channel to this server (TLS-aware)."""
+    def create_queue(self, name: str) -> None:
+        """Create a queue on the test server via FIBP."""
+        from fila import Client
+
+        kwargs: dict[str, object] = {}
         if self.tls_paths is not None:
             with open(self.tls_paths["ca_cert"], "rb") as f:
-                ca = f.read()
+                kwargs["ca_cert"] = f.read()
             with open(self.tls_paths["client_cert"], "rb") as f:
-                cert = f.read()
+                kwargs["client_cert"] = f.read()
             with open(self.tls_paths["client_key"], "rb") as f:
-                key = f.read()
-            creds = grpc.ssl_channel_credentials(
-                root_certificates=ca,
-                private_key=key,
-                certificate_chain=cert,
-            )
-            channel = grpc.secure_channel(self.addr, creds)
-        else:
-            channel = grpc.insecure_channel(self.addr)
-
+                kwargs["client_key"] = f.read()
         if self.api_key is not None:
-            from fila.client import _ApiKeyInterceptor
-            channel = grpc.intercept_channel(channel, _ApiKeyInterceptor(self.api_key))
+            kwargs["api_key"] = self.api_key
+        kwargs["accumulator_mode"] = __import__("fila").AccumulatorMode.DISABLED
 
-        return channel
+        with Client(self.addr, **kwargs) as client:  # type: ignore[arg-type]
+            client.create_queue(name)
 
-    def create_queue(self, name: str) -> None:
-        """Create a queue on the test server via admin gRPC."""
-        channel = self._make_channel()
-        stub = admin_pb2_grpc.FilaAdminStub(channel)
-        stub.CreateQueue(
-            admin_pb2.CreateQueueRequest(
-                name=name,
-                config=admin_pb2.QueueConfig(),
-            )
-        )
-        channel.close()
+
+def _wait_for_server(addr: str, timeout: float = 10.0, **client_kwargs: object) -> bool:
+    """Wait for the fila-server to become ready by attempting a FIBP handshake."""
+    from fila import AccumulatorMode, Client
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with Client(
+                addr,
+                accumulator_mode=AccumulatorMode.DISABLED,
+                **client_kwargs,  # type: ignore[arg-type]
+            ) as client:
+                client.list_queues()
+                return True
+        except Exception:
+            time.sleep(0.05)
+    return False
 
 
 @pytest.fixture()
@@ -217,7 +217,6 @@ def server() -> Generator[TestServer, None, None]:
 
     data_dir = tempfile.mkdtemp(prefix="fila-test-")
 
-    # Write config file for the server.
     config_path = os.path.join(data_dir, "fila.toml")
     with open(config_path, "w") as f:
         f.write(f'[server]\nlisten_addr = "{addr}"\n')
@@ -233,24 +232,11 @@ def server() -> Generator[TestServer, None, None]:
 
     ts = TestServer(addr, process, data_dir)
 
-    # Wait for server to be ready.
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        channel = grpc.insecure_channel(addr)
-        try:
-            stub = admin_pb2_grpc.FilaAdminStub(channel)
-            stub.ListQueues(admin_pb2.ListQueuesRequest())
-            channel.close()
-            break
-        except grpc.RpcError:
-            channel.close()
-            time.sleep(0.05)
-    else:
+    if not _wait_for_server(addr):
         ts.stop()
         pytest.fail("fila-server did not become ready within 10s")
 
     yield ts
-
     ts.stop()
 
 
@@ -271,7 +257,6 @@ def tls_server() -> Generator[TestServer, None, None]:
     data_dir = tempfile.mkdtemp(prefix="fila-tls-test-")
     tls_paths = _generate_self_signed_certs(data_dir)
 
-    # Write config with TLS enabled.
     config_path = os.path.join(data_dir, "fila.toml")
     with open(config_path, "w") as f:
         f.write(
@@ -295,24 +280,20 @@ def tls_server() -> Generator[TestServer, None, None]:
 
     ts = TestServer(addr, process, data_dir, tls_paths=tls_paths)
 
-    # Wait for server to be ready (use TLS channel).
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        channel = ts._make_channel()
-        try:
-            stub = admin_pb2_grpc.FilaAdminStub(channel)
-            stub.ListQueues(admin_pb2.ListQueuesRequest())
-            channel.close()
-            break
-        except grpc.RpcError:
-            channel.close()
-            time.sleep(0.05)
-    else:
+    with open(tls_paths["ca_cert"], "rb") as f:
+        ca_cert = f.read()
+    with open(tls_paths["client_cert"], "rb") as f:
+        client_cert = f.read()
+    with open(tls_paths["client_key"], "rb") as f:
+        client_key = f.read()
+
+    if not _wait_for_server(
+        addr, ca_cert=ca_cert, client_cert=client_cert, client_key=client_key
+    ):
         ts.stop()
         pytest.fail("TLS fila-server did not become ready within 10s")
 
     yield ts
-
     ts.stop()
 
 
@@ -328,7 +309,6 @@ def auth_server() -> Generator[TestServer, None, None]:
 
     data_dir = tempfile.mkdtemp(prefix="fila-auth-test-")
 
-    # Write config with bootstrap API key.
     config_path = os.path.join(data_dir, "fila.toml")
     with open(config_path, "w") as f:
         f.write(
@@ -348,22 +328,9 @@ def auth_server() -> Generator[TestServer, None, None]:
 
     ts = TestServer(addr, process, data_dir, api_key=bootstrap_key)
 
-    # Wait for server to be ready.
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        channel = ts._make_channel()
-        try:
-            stub = admin_pb2_grpc.FilaAdminStub(channel)
-            stub.ListQueues(admin_pb2.ListQueuesRequest())
-            channel.close()
-            break
-        except grpc.RpcError:
-            channel.close()
-            time.sleep(0.05)
-    else:
+    if not _wait_for_server(addr, api_key=bootstrap_key):
         ts.stop()
         pytest.fail("auth fila-server did not become ready within 10s")
 
     yield ts
-
     ts.stop()

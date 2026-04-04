@@ -4,24 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fila-python"
-version = "0.1.0"
+version = "0.3.0"
 description = "Python client SDK for the Fila message broker"
 readme = "README.md"
-license = "AGPL-3.0-or-later"
+license = {text = "AGPL-3.0-or-later"}
 requires-python = ">=3.10"
-dependencies = [
-    "grpcio>=1.60.0",
-    "protobuf>=4.25.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
-    "grpcio-tools>=1.60.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.3",
     "mypy>=1.8",
-    "mypy-protobuf>=3.5",
 ]
 
 [tool.setuptools.packages.find]
@@ -30,24 +25,16 @@ include = ["fila*"]
 [tool.ruff]
 target-version = "py310"
 line-length = 100
-exclude = ["fila/v1/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "TCH"]
+ignore = ["SIM115"]
 
 [tool.mypy]
 python_version = "3.10"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
-
-[[tool.mypy.overrides]]
-module = "fila.v1.*"
-ignore_errors = true
-
-[[tool.mypy.overrides]]
-module = "grpc.*"
-ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

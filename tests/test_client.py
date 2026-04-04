@@ -17,14 +17,14 @@ class TestSyncClient:
         assert isinstance(server, TestServer)
         server.create_queue("test-sync-eca")
 
-        with fila.Client(server.addr) as client:
-            # Enqueue a message.
+        with fila.Client(
+            server.addr, accumulator_mode=fila.AccumulatorMode.DISABLED
+        ) as client:
             headers = {"tenant": "acme"}
             payload = b"hello world"
             msg_id = client.enqueue("test-sync-eca", headers, payload)
             assert msg_id != ""
 
-            # Consume the message.
             stream = client.consume("test-sync-eca")
             msg = next(stream)
 
@@ -32,7 +32,6 @@ class TestSyncClient:
             assert msg.headers["tenant"] == "acme"
             assert msg.payload == b"hello world"
 
-            # Ack the message.
             client.ack("test-sync-eca", msg.id)
 
     def test_enqueue_consume_nack_redeliver(self, server: object) -> None:
@@ -42,26 +41,23 @@ class TestSyncClient:
         assert isinstance(server, TestServer)
         server.create_queue("test-sync-nack")
 
-        with fila.Client(server.addr) as client:
+        with fila.Client(
+            server.addr, accumulator_mode=fila.AccumulatorMode.DISABLED
+        ) as client:
             msg_id = client.enqueue("test-sync-nack", None, b"retry-me")
 
-            # Open consume stream.
             stream = client.consume("test-sync-nack")
 
-            # First delivery.
             msg = next(stream)
             assert msg.id == msg_id
             assert msg.attempt_count == 0
 
-            # Nack the message.
             client.nack("test-sync-nack", msg.id, "transient failure")
 
-            # Redelivery on the same stream.
             msg2 = next(stream)
             assert msg2.id == msg_id
             assert msg2.attempt_count == 1
 
-            # Ack to clean up.
             client.ack("test-sync-nack", msg2.id)
 
     def test_enqueue_nonexistent_queue(self, server: object) -> None:
@@ -70,7 +66,9 @@ class TestSyncClient:
 
         assert isinstance(server, TestServer)
 
-        with fila.Client(server.addr) as client, pytest.raises(fila.QueueNotFoundError):
+        with fila.Client(
+            server.addr, accumulator_mode=fila.AccumulatorMode.DISABLED
+        ) as client, pytest.raises(fila.QueueNotFoundError):
             client.enqueue("does-not-exist", None, b"test")
 
 
@@ -86,13 +84,11 @@ class TestAsyncClient:
         server.create_queue("test-async-eca")
 
         async with fila.AsyncClient(server.addr) as client:
-            # Enqueue a message.
             msg_id = await client.enqueue(
                 "test-async-eca", {"tenant": "acme"}, b"hello async"
             )
             assert msg_id != ""
 
-            # Consume the message.
             stream = await client.consume("test-async-eca")
             msg = await stream.__anext__()
 
@@ -100,7 +96,6 @@ class TestAsyncClient:
             assert msg.headers["tenant"] == "acme"
             assert msg.payload == b"hello async"
 
-            # Ack the message.
             await client.ack("test-async-eca", msg.id)
 
 
@@ -128,6 +123,7 @@ class TestTlsClient:
             ca_cert=ca_cert,
             client_cert=client_cert,
             client_key=client_key,
+            accumulator_mode=fila.AccumulatorMode.DISABLED,
         ) as client:
             msg_id = client.enqueue("test-tls", {"secure": "true"}, b"tls payload")
             assert msg_id != ""
@@ -187,7 +183,11 @@ class TestApiKeyAuth:
 
         auth_server.create_queue("test-auth")
 
-        with fila.Client(auth_server.addr, api_key=auth_server.api_key) as client:
+        with fila.Client(
+            auth_server.addr,
+            api_key=auth_server.api_key,
+            accumulator_mode=fila.AccumulatorMode.DISABLED,
+        ) as client:
             msg_id = client.enqueue("test-auth", None, b"authenticated")
             assert msg_id != ""
 
@@ -201,31 +201,19 @@ class TestApiKeyAuth:
 
     def test_missing_api_key_rejected(self, auth_server: object) -> None:
         """Requests without API key are rejected when auth is enabled."""
-        import grpc
-
         from tests.conftest import TestServer
 
         assert isinstance(auth_server, TestServer)
 
-        # Probe whether the server actually enforces API key auth.
-        # The dev-latest binary may predate the bootstrap_apikey feature,
-        # in which case unauthenticated requests succeed rather than fail.
-        with fila.Client(auth_server.addr) as probe:
-            try:
-                probe.enqueue("__auth_probe__", None, b"probe")
-            except fila.RPCError as e:
-                if e.code != grpc.StatusCode.UNAUTHENTICATED:
-                    pytest.fail(f"unexpected RPC error during auth probe: {e.code}")
-            except fila.QueueNotFoundError:
-                pytest.skip("server does not enforce API key auth")
-            else:
-                pytest.skip("server does not enforce API key auth")
-
-        # If we reach here, the server enforces auth.
-        with fila.Client(auth_server.addr) as client:
-            with pytest.raises(fila.RPCError) as exc_info:
-                client.enqueue("test-auth", None, b"no-key")
-            assert exc_info.value.code == grpc.StatusCode.UNAUTHENTICATED
+        # Attempt to connect without an API key -- the handshake should fail.
+        with (
+            pytest.raises((fila.UnauthorizedError, fila.FilaError)),
+            fila.Client(
+                auth_server.addr,
+                accumulator_mode=fila.AccumulatorMode.DISABLED,
+            ) as client,
+        ):
+            client.enqueue("test-auth", None, b"no-key")
 
     @pytest.mark.asyncio
     async def test_async_api_key_enqueue(self, auth_server: object) -> None:
