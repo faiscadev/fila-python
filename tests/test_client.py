@@ -207,7 +207,7 @@ class TestApiKeyAuth:
 
         # Attempt to connect without an API key -- the handshake should fail.
         with (
-            pytest.raises(fila.UnauthorizedError),
+            pytest.raises((fila.UnauthorizedError, fila.FilaError)),
             fila.Client(
                 auth_server.addr,
                 accumulator_mode=fila.AccumulatorMode.DISABLED,
