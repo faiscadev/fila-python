@@ -8,12 +8,15 @@ from typing import TYPE_CHECKING
 from fila.conn import AsyncConnection
 from fila.errors import (
     NotLeaderError,
+    _map_error_code,
     _map_per_item_error,
     _raise_from_error_frame,
 )
 from fila.fibp.codec import (
     decode_ack_result,
     decode_create_api_key_result,
+    decode_create_queue_result,
+    decode_delete_queue_result,
     decode_delivery,
     decode_enqueue_result,
     decode_error,
@@ -24,6 +27,10 @@ from fila.fibp.codec import (
     decode_list_config_result,
     decode_list_queues_result,
     decode_nack_result,
+    decode_redrive_result,
+    decode_revoke_api_key_result,
+    decode_set_acl_result,
+    decode_set_config_result,
     encode_ack,
     encode_create_api_key,
     encode_create_queue,
@@ -44,11 +51,15 @@ from fila.fibp.codec import (
 from fila.fibp.opcodes import ErrorCode, Opcode
 from fila.types import (
     AclEntry,
+    AclPermission,
     ApiKeyInfo,
     ConsumeMessage,
     CreateApiKeyResult,
     EnqueueResult,
+    FairnessKeyStat,
+    QueueInfo,
     StatsResult,
+    ThrottleKeyStat,
 )
 
 if TYPE_CHECKING:
@@ -56,7 +67,6 @@ if TYPE_CHECKING:
 
 
 def _parse_addr(addr: str) -> tuple[str, int]:
-    """Parse 'host:port' into (host, port)."""
     if ":" not in addr:
         raise ValueError(f"invalid address (expected host:port): {addr}")
     host, port_str = addr.rsplit(":", 1)
@@ -64,43 +74,7 @@ def _parse_addr(addr: str) -> tuple[str, int]:
 
 
 class AsyncClient:
-    """Asynchronous client for the Fila message broker.
-
-    Wraps the hot-path FIBP operations: enqueue, enqueue_many, consume, ack, nack.
-
-    Usage::
-
-        client = await AsyncClient.create("localhost:5555")
-        msg_id = await client.enqueue("my-queue", {"tenant": "acme"}, b"hello")
-        async for msg in await client.consume("my-queue"):
-            await client.ack("my-queue", msg.id)
-        await client.close()
-
-    Or as an async context manager::
-
-        async with AsyncClient("localhost:5555") as client:
-            await client.enqueue("my-queue", None, b"hello")
-
-    TLS (system trust store)::
-
-        client = AsyncClient("localhost:5555", tls=True)
-
-    TLS (custom CA)::
-
-        with open("ca.pem", "rb") as f:
-            ca = f.read()
-        client = AsyncClient("localhost:5555", ca_cert=ca)
-
-    mTLS + API key::
-
-        client = AsyncClient(
-            "localhost:5555",
-            ca_cert=ca,
-            client_cert=cert,
-            client_key=key,
-            api_key="fila_...",
-        )
-    """
+    """Asynchronous client for the Fila message broker."""
 
     def __init__(
         self,
@@ -123,13 +97,12 @@ class AsyncClient:
         use_tls = tls or ca_cert is not None
         if (client_cert is not None or client_key is not None) and not use_tls:
             raise ValueError(
-                "client_cert and client_key require ca_cert or tls=True to establish a TLS channel"
+                "client_cert and client_key require ca_cert or tls=True"
             )
 
         self._ssl_ctx = self._make_ssl_context() if use_tls else None
 
     def _make_ssl_context(self) -> ssl.SSLContext:
-        """Create an SSL context from stored credentials."""
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         if self._ca_cert is not None:
             ctx.load_verify_locations(cadata=self._ca_cert.decode("ascii"))
@@ -153,7 +126,6 @@ class AsyncClient:
         return ctx
 
     async def _ensure_connected(self) -> AsyncConnection:
-        """Ensure a connection exists, creating one if needed."""
         if self._conn is None:
             host, port = _parse_addr(self._addr)
             self._conn = await AsyncConnection.connect(
@@ -162,10 +134,9 @@ class AsyncClient:
         return self._conn
 
     async def _reconnect(self, addr: str) -> None:
-        """Reconnect to a different address (e.g. after leader hint)."""
-        if self._conn is not None:
-            import contextlib
+        import contextlib
 
+        if self._conn is not None:
             with contextlib.suppress(OSError):
                 await self._conn.close()
         self._addr = addr
@@ -173,7 +144,6 @@ class AsyncClient:
         await self._ensure_connected()
 
     async def close(self) -> None:
-        """Close the underlying connection."""
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
@@ -193,11 +163,7 @@ class AsyncClient:
         headers: dict[str, str] | None,
         payload: bytes,
     ) -> str:
-        """Enqueue a message to the specified queue.
-
-        Returns:
-            Broker-assigned message ID (UUIDv7).
-        """
+        """Enqueue a message. Returns the broker-assigned message ID."""
         await self._ensure_connected()
         msgs = [{"queue": queue, "headers": headers or {}, "payload": payload}]
         body = encode_enqueue(msgs)
@@ -205,7 +171,6 @@ class AsyncClient:
         header, resp_body = await self._request_with_leader_retry(
             Opcode.ENQUEUE, body
         )
-
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
@@ -231,7 +196,6 @@ class AsyncClient:
         header, resp_body = await self._request_with_leader_retry(
             Opcode.ENQUEUE, body
         )
-
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
@@ -242,16 +206,12 @@ class AsyncClient:
             if item.error_code == ErrorCode.OK:
                 results.append(EnqueueResult(message_id=item.message_id, error=None))
             else:
-                results.append(
-                    EnqueueResult(message_id=None, error=f"error 0x{item.error_code:02x}")
-                )
+                err_msg = f"error 0x{item.error_code:02x}"
+                results.append(EnqueueResult(message_id=None, error=err_msg))
         return results
 
     async def consume(self, queue: str) -> AsyncIterator[ConsumeMessage]:
-        """Open a streaming consumer on the specified queue.
-
-        Returns an async iterator that yields messages as they arrive.
-        """
+        """Open a streaming consumer on the specified queue."""
         conn = await self._ensure_connected()
         try:
             _req_id, consumer_id = await conn.subscribe(queue)
@@ -268,7 +228,6 @@ class AsyncClient:
     async def _consume_iter(
         self, conn: AsyncConnection, consumer_id: str
     ) -> AsyncIterator[ConsumeMessage]:
-        """Internal async generator reading Delivery frames."""
         try:
             while True:
                 header, body = await conn.read_frame()
@@ -294,7 +253,6 @@ class AsyncClient:
             return
 
     async def ack(self, queue: str, msg_id: str) -> None:
-        """Acknowledge a successfully processed message."""
         body = encode_ack([{"queue": queue, "message_id": msg_id}])
         header, resp_body = await self._request_with_leader_retry(Opcode.ACK, body)
 
@@ -307,7 +265,6 @@ class AsyncClient:
             raise _map_per_item_error(codes[0], "ack")
 
     async def nack(self, queue: str, msg_id: str, error: str) -> None:
-        """Negatively acknowledge a message that failed processing."""
         body = encode_nack([{"queue": queue, "message_id": msg_id, "error": error}])
         header, resp_body = await self._request_with_leader_retry(Opcode.NACK, body)
 
@@ -321,134 +278,215 @@ class AsyncClient:
 
     # -- admin operations ----------------------------------------------------
 
-    async def create_queue(self, name: str, config: dict[str, str] | None = None) -> None:
-        """Create a queue on the broker."""
-        body = encode_create_queue(name, config)
-        header, resp_body = await self._request_with_leader_retry(Opcode.CREATE_QUEUE, body)
+    async def create_queue(self, name: str) -> None:
+        body = encode_create_queue(name)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.CREATE_QUEUE, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
+        result = decode_create_queue_result(resp_body)
+        if result.error_code != ErrorCode.OK:
+            raise _map_error_code(result.error_code, "create_queue failed")
 
     async def delete_queue(self, name: str) -> None:
-        """Delete a queue from the broker."""
         body = encode_delete_queue(name)
-        header, resp_body = await self._request_with_leader_retry(Opcode.DELETE_QUEUE, body)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.DELETE_QUEUE, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
+        error_code = decode_delete_queue_result(resp_body)
+        if error_code != ErrorCode.OK:
+            raise _map_error_code(error_code, "delete_queue failed")
 
     async def get_stats(self, queue: str) -> StatsResult:
-        """Get statistics for a queue."""
         body = encode_get_stats(queue)
-        header, resp_body = await self._request_with_leader_retry(Opcode.GET_STATS, body)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.GET_STATS, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
-        result = decode_get_stats_result(resp_body)
-        return StatsResult(stats=result.stats)
+        r = decode_get_stats_result(resp_body)
+        if r.error_code != ErrorCode.OK:
+            raise _map_error_code(r.error_code, "get_stats failed")
+        return StatsResult(
+            depth=r.depth, in_flight=r.in_flight,
+            active_fairness_keys=r.active_fairness_keys,
+            active_consumers=r.active_consumers, quantum=r.quantum,
+            leader_node_id=r.leader_node_id,
+            replication_count=r.replication_count,
+            per_key_stats=[
+                FairnessKeyStat(
+                    key=s.key, pending_count=s.pending_count,
+                    current_deficit=s.current_deficit, weight=s.weight,
+                ) for s in r.per_key_stats
+            ],
+            per_throttle_stats=[
+                ThrottleKeyStat(
+                    key=s.key, tokens=s.tokens,
+                    rate_per_second=s.rate_per_second, burst=s.burst,
+                ) for s in r.per_throttle_stats
+            ],
+        )
 
-    async def list_queues(self) -> list[str]:
-        """List all queues on the broker."""
+    async def list_queues(self) -> list[QueueInfo]:
         body = encode_list_queues()
-        header, resp_body = await self._request_with_leader_retry(Opcode.LIST_QUEUES, body)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.LIST_QUEUES, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
-        return decode_list_queues_result(resp_body)
+        r = decode_list_queues_result(resp_body)
+        if r.error_code != ErrorCode.OK:
+            raise _map_error_code(r.error_code, "list_queues failed")
+        return [
+            QueueInfo(
+                name=q.name, depth=q.depth, in_flight=q.in_flight,
+                active_consumers=q.active_consumers,
+                leader_node_id=q.leader_node_id,
+            ) for q in r.queues
+        ]
 
-    async def set_config(self, queue: str, config: dict[str, str]) -> None:
-        """Set configuration for a queue."""
-        body = encode_set_config(queue, config)
-        header, resp_body = await self._request_with_leader_retry(Opcode.SET_CONFIG, body)
+    async def set_config(self, key: str, value: str) -> None:
+        body = encode_set_config(key, value)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.SET_CONFIG, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
+        error_code = decode_set_config_result(resp_body)
+        if error_code != ErrorCode.OK:
+            raise _map_error_code(error_code, "set_config failed")
 
-    async def get_config(self, queue: str) -> dict[str, str]:
-        """Get configuration for a queue."""
-        body = encode_get_config(queue)
-        header, resp_body = await self._request_with_leader_retry(Opcode.GET_CONFIG, body)
+    async def get_config(self, key: str) -> str:
+        body = encode_get_config(key)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.GET_CONFIG, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
-        return decode_get_config_result(resp_body)
+        error_code, value = decode_get_config_result(resp_body)
+        if error_code != ErrorCode.OK:
+            raise _map_error_code(error_code, "get_config failed")
+        return value
 
-    async def list_config(self, queue: str) -> dict[str, str]:
-        """List all configuration for a queue."""
-        body = encode_list_config(queue)
-        header, resp_body = await self._request_with_leader_retry(Opcode.LIST_CONFIG, body)
+    async def list_config(self, prefix: str) -> dict[str, str]:
+        body = encode_list_config(prefix)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.LIST_CONFIG, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
-        return decode_list_config_result(resp_body)
+        error_code, entries = decode_list_config_result(resp_body)
+        if error_code != ErrorCode.OK:
+            raise _map_error_code(error_code, "list_config failed")
+        return entries
 
-    async def redrive(self, source_queue: str, dest_queue: str, count: int) -> None:
-        """Redrive messages from one queue to another."""
-        body = encode_redrive(source_queue, dest_queue, count)
-        header, resp_body = await self._request_with_leader_retry(Opcode.REDRIVE, body)
+    async def redrive(self, dlq_queue: str, count: int) -> int:
+        body = encode_redrive(dlq_queue, count)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.REDRIVE, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
+        error_code, redriven = decode_redrive_result(resp_body)
+        if error_code != ErrorCode.OK:
+            raise _map_error_code(error_code, "redrive failed")
+        return redriven
 
     # -- auth operations -----------------------------------------------------
 
     async def create_api_key(self, name: str) -> CreateApiKeyResult:
-        """Create a new API key."""
         body = encode_create_api_key(name)
-        header, resp_body = await self._request_with_leader_retry(Opcode.CREATE_API_KEY, body)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.CREATE_API_KEY, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
-        key_id, raw_key = decode_create_api_key_result(resp_body)
-        return CreateApiKeyResult(key_id=key_id, raw_key=raw_key)
+        ec, key_id, raw_key, is_superadmin = decode_create_api_key_result(resp_body)
+        if ec != ErrorCode.OK:
+            raise _map_error_code(ec, "create_api_key failed")
+        return CreateApiKeyResult(
+            key_id=key_id, raw_key=raw_key, is_superadmin=is_superadmin
+        )
 
     async def revoke_api_key(self, key_id: str) -> None:
-        """Revoke an API key."""
         body = encode_revoke_api_key(key_id)
-        header, resp_body = await self._request_with_leader_retry(Opcode.REVOKE_API_KEY, body)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.REVOKE_API_KEY, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
+        error_code = decode_revoke_api_key_result(resp_body)
+        if error_code != ErrorCode.OK:
+            raise _map_error_code(error_code, "revoke_api_key failed")
 
     async def list_api_keys(self) -> list[ApiKeyInfo]:
-        """List all API keys."""
         body = encode_list_api_keys()
-        header, resp_body = await self._request_with_leader_retry(Opcode.LIST_API_KEYS, body)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.LIST_API_KEYS, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
-        items = decode_list_api_keys_result(resp_body)
+        error_code, items = decode_list_api_keys_result(resp_body)
+        if error_code != ErrorCode.OK:
+            raise _map_error_code(error_code, "list_api_keys failed")
         return [
-            ApiKeyInfo(key_id=k.key_id, prefix=k.prefix, created_at=k.created_at)
-            for k in items
+            ApiKeyInfo(
+                key_id=k.key_id, name=k.name, created_at=k.created_at,
+                expires_at=k.expires_at, is_superadmin=k.is_superadmin,
+            ) for k in items
         ]
 
-    async def set_acl(
-        self, key_id: str, patterns: list[str], superadmin: bool = False
-    ) -> None:
-        """Set ACL for an API key."""
-        body = encode_set_acl(key_id, patterns, superadmin)
-        header, resp_body = await self._request_with_leader_retry(Opcode.SET_ACL, body)
+    async def set_acl(self, key_id: str, permissions: list[tuple[str, str]]) -> None:
+        body = encode_set_acl(key_id, permissions)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.SET_ACL, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
+        error_code = decode_set_acl_result(resp_body)
+        if error_code != ErrorCode.OK:
+            raise _map_error_code(error_code, "set_acl failed")
 
     async def get_acl(self, key_id: str) -> AclEntry:
-        """Get ACL for an API key."""
         body = encode_get_acl(key_id)
-        header, resp_body = await self._request_with_leader_retry(Opcode.GET_ACL, body)
+        header, resp_body = await self._request_with_leader_retry(
+            Opcode.GET_ACL, body
+        )
         if header.opcode == Opcode.ERROR:
             err = decode_error(resp_body)
             _raise_from_error_frame(err)
         result = decode_get_acl_result(resp_body)
-        return AclEntry(patterns=result.patterns, superadmin=result.superadmin)
+        if result.error_code != ErrorCode.OK:
+            raise _map_error_code(result.error_code, "get_acl failed")
+        return AclEntry(
+            key_id=result.key_id,
+            is_superadmin=result.is_superadmin,
+            permissions=[
+                AclPermission(kind=p.kind, pattern=p.pattern)
+                for p in result.permissions
+            ],
+        )
 
     # -- internal helpers ----------------------------------------------------
 
     async def _request_with_leader_retry(
         self, opcode: int, body: bytes
     ) -> tuple[object, bytes]:
-        """Send a request, retrying once on NotLeader with leader hint."""
         conn = await self._ensure_connected()
         header, resp_body = await conn.request(opcode, body)
 

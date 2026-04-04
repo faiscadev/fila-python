@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 
 
@@ -73,6 +73,7 @@ class CreateApiKeyResult:
 
     key_id: str
     raw_key: str
+    is_superadmin: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,20 +81,70 @@ class ApiKeyInfo:
     """Summary information about an API key."""
 
     key_id: str
-    prefix: str
+    name: str
     created_at: int
+    expires_at: int = 0
+    is_superadmin: bool = False
+
+
+@dataclass(frozen=True)
+class AclPermission:
+    """A single ACL permission."""
+
+    kind: str
+    pattern: str
 
 
 @dataclass(frozen=True)
 class AclEntry:
     """ACL entry for an API key."""
 
-    patterns: list[str]
-    superadmin: bool
+    key_id: str
+    is_superadmin: bool
+    permissions: list[AclPermission] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class FairnessKeyStat:
+    """Per-fairness-key statistics."""
+
+    key: str
+    pending_count: int
+    current_deficit: int
+    weight: int
+
+
+@dataclass(frozen=True)
+class ThrottleKeyStat:
+    """Per-throttle-key statistics."""
+
+    key: str
+    tokens: float
+    rate_per_second: float
+    burst: float
 
 
 @dataclass(frozen=True)
 class StatsResult:
     """Queue statistics."""
 
-    stats: dict[str, str]
+    depth: int
+    in_flight: int
+    active_fairness_keys: int
+    active_consumers: int
+    quantum: int
+    leader_node_id: int = 0
+    replication_count: int = 0
+    per_key_stats: list[FairnessKeyStat] = field(default_factory=list)
+    per_throttle_stats: list[ThrottleKeyStat] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class QueueInfo:
+    """Summary information about a queue."""
+
+    name: str
+    depth: int
+    in_flight: int
+    active_consumers: int
+    leader_node_id: int = 0
