@@ -33,13 +33,13 @@ class Opcode(IntEnum):
     ENQUEUE = 0x10
     ENQUEUE_RESULT = 0x11
     CONSUME = 0x12
-    DELIVERY = 0x13
-    CANCEL_CONSUME = 0x14
-    ACK = 0x15
-    ACK_RESULT = 0x16
-    NACK = 0x17
-    NACK_RESULT = 0x18
-    CONSUME_OK = 0x19
+    CONSUME_OK = 0x13
+    DELIVERY = 0x14
+    CANCEL_CONSUME = 0x15
+    ACK = 0x16
+    ACK_RESULT = 0x17
+    NACK = 0x18
+    NACK_RESULT = 0x19
 
     # Error
     ERROR = 0xFE
