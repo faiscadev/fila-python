@@ -104,22 +104,22 @@ class Reader:
         return v
 
     def read_u16(self) -> int:
-        v = struct.unpack_from("!H", self._data, self._pos)[0]
+        v: int = struct.unpack_from("!H", self._data, self._pos)[0]
         self._pos += 2
         return v
 
     def read_u32(self) -> int:
-        v = struct.unpack_from("!I", self._data, self._pos)[0]
+        v: int = struct.unpack_from("!I", self._data, self._pos)[0]
         self._pos += 4
         return v
 
     def read_u64(self) -> int:
-        v = struct.unpack_from("!Q", self._data, self._pos)[0]
+        v: int = struct.unpack_from("!Q", self._data, self._pos)[0]
         self._pos += 8
         return v
 
     def read_i64(self) -> int:
-        v = struct.unpack_from("!q", self._data, self._pos)[0]
+        v: int = struct.unpack_from("!q", self._data, self._pos)[0]
         self._pos += 8
         return v
 

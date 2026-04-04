@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import socket
-import ssl
 import struct
 import threading
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import ssl
 
 from fila.fibp.codec import (
     decode_error,
@@ -37,24 +40,6 @@ def _build_frame(opcode: int, request_id: int, body: bytes, flags: int = 0) -> b
     return struct.pack("!I", len(frame_body)) + frame_body
 
 
-def make_ssl_context(
-    *,
-    ca_cert: bytes | None = None,
-    client_cert: bytes | None = None,
-    client_key: bytes | None = None,
-    system_trust: bool = False,
-) -> ssl.SSLContext:
-    """Create an SSLContext for TLS connections."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    if ca_cert is not None:
-        ctx.load_verify_locations(cadata=ca_cert.decode("ascii"))
-    elif system_trust:
-        ctx.load_default_certs()
-    if client_cert is not None and client_key is not None:
-        ctx.load_cert_chain(certdata=client_cert, keydata=client_key)
-    return ctx
-
-
 # ---------------------------------------------------------------------------
 # Synchronous connection
 # ---------------------------------------------------------------------------
@@ -67,6 +52,7 @@ class Connection:
         self._max_frame_size = max_frame_size
         self._req_counter = 0
         self._lock = threading.Lock()
+        self._pushback: tuple[FrameHeader, bytes] | None = None
 
     @classmethod
     def connect(
@@ -125,6 +111,11 @@ class Connection:
         Handles Ping by responding with Pong automatically.
         Handles continuation frames by concatenating bodies.
         """
+        if self._pushback is not None:
+            frame = self._pushback
+            self._pushback = None
+            return frame
+
         while True:
             header, body = self._read_single_frame()
 
@@ -194,18 +185,21 @@ class Connection:
             from fila.errors import _raise_from_error_frame
             _raise_from_error_frame(err)
 
-        if header.opcode != Opcode.CONSUME_OK:
-            raise ConnectionError(
-                f"expected ConsumeOk (0x19), got 0x{header.opcode:02x}"
-            )
+        if header.opcode == Opcode.CONSUME_OK:
+            consumer_id = decode_consume_ok(body)
+            return req_id, consumer_id
 
-        consumer_id = decode_consume_ok(body)
-        return req_id, consumer_id
+        # Server may send Delivery directly (older binaries without ConsumeOk).
+        # Push the frame back so the consume iterator can read it.
+        self._pushback = (header, body)
+        return req_id, ""
 
     def cancel_consume(self, consumer_id: str) -> None:
         """Send a CancelConsume frame."""
         from fila.fibp.codec import encode_cancel_consume
 
+        if not consumer_id:
+            return
         req_id = self._next_request_id()
         self.write_frame(Opcode.CANCEL_CONSUME, req_id, encode_cancel_consume(consumer_id))
 
@@ -240,6 +234,7 @@ class AsyncConnection:
         self._max_frame_size = max_frame_size
         self._req_counter = 0
         self._lock = asyncio.Lock()
+        self._pushback: tuple[FrameHeader, bytes] | None = None
 
     @classmethod
     async def connect(
@@ -305,6 +300,11 @@ class AsyncConnection:
         Handles Ping by responding with Pong automatically.
         Handles continuation frames by concatenating bodies.
         """
+        if self._pushback is not None:
+            frame = self._pushback
+            self._pushback = None
+            return frame
+
         while True:
             header, body = await self._read_single_frame()
 
@@ -364,17 +364,20 @@ class AsyncConnection:
             from fila.errors import _raise_from_error_frame
             _raise_from_error_frame(err)
 
-        if header.opcode != Opcode.CONSUME_OK:
-            raise ConnectionError(
-                f"expected ConsumeOk (0x19), got 0x{header.opcode:02x}"
-            )
+        if header.opcode == Opcode.CONSUME_OK:
+            consumer_id = decode_consume_ok(body)
+            return req_id, consumer_id
 
-        consumer_id = decode_consume_ok(body)
-        return req_id, consumer_id
+        # Server may send Delivery directly (older binaries without ConsumeOk).
+        self._pushback = (header, body)
+        return req_id, ""
 
     async def cancel_consume(self, consumer_id: str) -> None:
         """Send a CancelConsume frame."""
         from fila.fibp.codec import encode_cancel_consume
+
+        if not consumer_id:
+            return
 
         req_id = self._next_request_id()
         await self.write_frame(

@@ -49,7 +49,7 @@ from fila.fibp.codec import (
     encode_set_acl,
     encode_set_config,
 )
-from fila.fibp.opcodes import ErrorCode, Opcode
+from fila.fibp.opcodes import ErrorCode, FrameHeader, Opcode
 from fila.types import (
     AccumulatorMode,
     AclEntry,
@@ -559,7 +559,7 @@ class Client:
 
     def _request_with_leader_retry(
         self, opcode: int, body: bytes
-    ) -> tuple[object, bytes]:
+    ) -> tuple[FrameHeader, bytes]:
         """Send a request, retrying once on NotLeader with leader hint."""
         header, resp_body = self._conn.request(opcode, body)
 

@@ -48,7 +48,7 @@ from fila.fibp.codec import (
     encode_set_acl,
     encode_set_config,
 )
-from fila.fibp.opcodes import ErrorCode, Opcode
+from fila.fibp.opcodes import ErrorCode, FrameHeader, Opcode
 from fila.types import (
     AclEntry,
     AclPermission,
@@ -486,7 +486,7 @@ class AsyncClient:
 
     async def _request_with_leader_retry(
         self, opcode: int, body: bytes
-    ) -> tuple[object, bytes]:
+    ) -> tuple[FrameHeader, bytes]:
         conn = await self._ensure_connected()
         header, resp_body = await conn.request(opcode, body)
 
