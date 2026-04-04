@@ -15,7 +15,7 @@ class TestEnqueueMany:
     """Integration tests for the explicit enqueue_many method."""
 
     def test_enqueue_many_multiple_messages(self, server: object) -> None:
-        """enqueue_many sends multiple messages in one RPC and returns per-message results."""
+        """enqueue_many sends multiple messages in one request and returns per-message results."""
         from tests.conftest import TestServer
 
         assert isinstance(server, TestServer)
@@ -36,7 +36,6 @@ class TestEnqueueMany:
                 assert r.message_id is not None
                 assert r.error is None
 
-            # All message IDs should be unique.
             ids = [r.message_id for r in results]
             assert len(set(ids)) == 3
 
@@ -122,7 +121,6 @@ class TestAccumulatorModes:
             msg_id = client.enqueue("test-auto-accum", None, b"auto-msg")
             assert msg_id != ""
 
-            # Verify the message was actually enqueued.
             stream = client.consume("test-auto-accum")
             msg = next(stream)
             assert msg.id == msg_id
@@ -147,11 +145,10 @@ class TestAccumulatorModes:
                 assert msg_id != ""
                 ids.append(msg_id)
 
-            # All IDs should be unique.
             assert len(set(ids)) == 5
 
     def test_disabled_mode_enqueue(self, server: object) -> None:
-        """DISABLED mode sends each enqueue as a direct RPC."""
+        """DISABLED mode sends each enqueue as a direct request."""
         from tests.conftest import TestServer
 
         assert isinstance(server, TestServer)
@@ -195,7 +192,6 @@ class TestAccumulatorModes:
         assert isinstance(server, TestServer)
         server.create_queue("test-default-mode")
 
-        # No accumulator_mode arg = AUTO.
         with fila.Client(server.addr) as client:
             msg_id = client.enqueue("test-default-mode", None, b"default")
             assert msg_id != ""
@@ -209,7 +205,7 @@ class TestAccumulatorModeTypes:
         assert fila.AccumulatorMode.AUTO is not None
         assert fila.AccumulatorMode.DISABLED is not None
         modes = {fila.AccumulatorMode.AUTO, fila.AccumulatorMode.DISABLED}
-        assert len(modes) == 2  # They are distinct values
+        assert len(modes) == 2
 
     def test_linger_fields(self) -> None:
         """Linger stores linger_ms and max_messages."""

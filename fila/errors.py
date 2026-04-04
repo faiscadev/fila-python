@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import grpc
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fila.fibp.codec import ErrorFrame
 
 
 class FilaError(Exception):
@@ -17,13 +20,52 @@ class MessageNotFoundError(FilaError):
     """Raised when the specified message does not exist."""
 
 
-class RPCError(FilaError):
-    """Raised for unexpected gRPC failures, preserving status code and message."""
+class QueueAlreadyExistsError(FilaError):
+    """Raised when creating a queue that already exists."""
 
-    def __init__(self, code: grpc.StatusCode, message: str) -> None:
-        self.code = code
-        self.message = message
-        super().__init__(f"rpc error (code = {code.name}): {message}")
+
+class InvalidArgumentError(FilaError):
+    """Raised when an argument is invalid."""
+
+
+class PermissionDeniedError(FilaError):
+    """Raised when permission is denied for the operation."""
+
+
+class UnauthorizedError(FilaError):
+    """Raised when the client is not authenticated."""
+
+
+class ForbiddenError(FilaError):
+    """Raised when the client lacks permission for the operation."""
+
+
+class NotLeaderError(FilaError):
+    """Raised when the request was sent to a non-leader node.
+
+    The ``leader_addr`` attribute contains the address of the current leader,
+    if available.
+    """
+
+    def __init__(self, message: str, leader_addr: str | None = None) -> None:
+        self.leader_addr = leader_addr
+        super().__init__(message)
+
+
+class ChannelFullError(FilaError):
+    """Raised when a channel or buffer is full (backpressure)."""
+
+
+class ResourceExhaustedError(FilaError):
+    """Raised when a resource limit has been reached."""
+
+
+class UnavailableError(FilaError):
+    """Raised when the server is unavailable."""
+
+
+class LuaError(FilaError):
+    """Raised when a Lua script error occurs."""
 
 
 class EnqueueError(FilaError):
@@ -36,49 +78,101 @@ class EnqueueError(FilaError):
     """
 
 
-def _map_enqueue_result_error(code: int, message: str) -> FilaError:
-    """Map a per-message EnqueueErrorCode to a Fila exception.
+class ProtocolError(FilaError):
+    """Raised for unexpected protocol-level failures."""
 
-    Used when the unified Enqueue RPC succeeds at the transport level but
-    returns a per-message error result (e.g., queue not found for one of
-    the messages in the batch).
+    def __init__(self, code: int, message: str) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(f"protocol error (code=0x{code:02x}): {message}")
+
+
+class ApiKeyNotFoundError(FilaError):
+    """Raised when the specified API key does not exist."""
+
+
+class AclNotFoundError(FilaError):
+    """Raised when the specified ACL entry does not exist."""
+
+
+# Keep RPCError as a thin alias for backwards compatibility with existing
+# callers that catch fila.RPCError.
+RPCError = ProtocolError
+
+
+# ---------------------------------------------------------------------------
+# Error-code mapping
+# ---------------------------------------------------------------------------
+
+def _map_error_code(code: int, message: str) -> FilaError:
+    """Map a FIBP error code to the appropriate exception."""
+    from fila.fibp.opcodes import ErrorCode
+
+    match code:
+        case ErrorCode.QUEUE_NOT_FOUND:
+            return QueueNotFoundError(message)
+        case ErrorCode.MESSAGE_NOT_FOUND:
+            return MessageNotFoundError(message)
+        case ErrorCode.QUEUE_ALREADY_EXISTS:
+            return QueueAlreadyExistsError(message)
+        case ErrorCode.INVALID_ARGUMENT:
+            return InvalidArgumentError(message)
+        case ErrorCode.PERMISSION_DENIED:
+            return PermissionDeniedError(message)
+        case ErrorCode.UNAUTHENTICATED:
+            return UnauthorizedError(message)
+        case ErrorCode.FORBIDDEN:
+            return ForbiddenError(message)
+        case ErrorCode.NOT_LEADER:
+            return NotLeaderError(message)
+        case ErrorCode.CHANNEL_FULL:
+            return ChannelFullError(message)
+        case ErrorCode.RESOURCE_EXHAUSTED:
+            return ResourceExhaustedError(message)
+        case ErrorCode.UNAVAILABLE:
+            return UnavailableError(message)
+        case ErrorCode.LUA_ERROR:
+            return LuaError(message)
+        case ErrorCode.API_KEY_NOT_FOUND:
+            return ApiKeyNotFoundError(message)
+        case ErrorCode.ACL_NOT_FOUND:
+            return AclNotFoundError(message)
+        case ErrorCode.DEADLINE_EXCEEDED:
+            return ProtocolError(code, message)
+        case ErrorCode.PRECONDITION_FAILED:
+            return ProtocolError(code, message)
+        case ErrorCode.ABORTED:
+            return ProtocolError(code, message)
+        case ErrorCode.INTERNAL_ERROR:
+            return ProtocolError(code, message)
+        case _:
+            return ProtocolError(code, message)
+
+
+def _raise_from_error_frame(err: ErrorFrame) -> None:
+    """Raise the appropriate exception from a decoded Error frame.
+
+    For NotLeader errors, extracts the leader_addr from metadata.
     """
-    from fila.v1 import service_pb2
+    from fila.fibp.opcodes import ErrorCode
 
-    if code == service_pb2.ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND:
-        return QueueNotFoundError(f"enqueue: {message}")
-    if code == service_pb2.ENQUEUE_ERROR_CODE_PERMISSION_DENIED:
-        return RPCError(grpc.StatusCode.PERMISSION_DENIED, f"enqueue: {message}")
-    return EnqueueError(f"enqueue failed: {message}")
+    if err.code == ErrorCode.NOT_LEADER:
+        leader_addr = err.metadata.get("leader_addr")
+        raise NotLeaderError(err.message, leader_addr=leader_addr)
 
-
-def _map_enqueue_error(err: grpc.RpcError) -> FilaError:
-    """Map a gRPC error from an enqueue call to a Fila exception."""
-    code = err.code()
-    if code == grpc.StatusCode.NOT_FOUND:
-        return QueueNotFoundError(f"enqueue: {err.details()}")
-    return RPCError(code, err.details() or "")
+    raise _map_error_code(err.code, err.message)
 
 
-def _map_consume_error(err: grpc.RpcError) -> FilaError:
-    """Map a gRPC error from a consume call to a Fila exception."""
-    code = err.code()
-    if code == grpc.StatusCode.NOT_FOUND:
-        return QueueNotFoundError(f"consume: {err.details()}")
-    return RPCError(code, err.details() or "")
+def _map_per_item_error(code: int, context: str) -> FilaError:
+    """Map a per-item error code (from EnqueueResult, AckResult, etc.)."""
+    from fila.fibp.opcodes import ErrorCode
 
-
-def _map_ack_error(err: grpc.RpcError) -> FilaError:
-    """Map a gRPC error from an ack call to a Fila exception."""
-    code = err.code()
-    if code == grpc.StatusCode.NOT_FOUND:
-        return MessageNotFoundError(f"ack: {err.details()}")
-    return RPCError(code, err.details() or "")
-
-
-def _map_nack_error(err: grpc.RpcError) -> FilaError:
-    """Map a gRPC error from a nack call to a Fila exception."""
-    code = err.code()
-    if code == grpc.StatusCode.NOT_FOUND:
-        return MessageNotFoundError(f"nack: {err.details()}")
-    return RPCError(code, err.details() or "")
+    match code:
+        case ErrorCode.QUEUE_NOT_FOUND:
+            return QueueNotFoundError(f"{context}: queue not found")
+        case ErrorCode.MESSAGE_NOT_FOUND:
+            return MessageNotFoundError(f"{context}: message not found")
+        case ErrorCode.PERMISSION_DENIED:
+            return PermissionDeniedError(f"{context}: permission denied")
+        case _:
+            return EnqueueError(f"{context}: error code 0x{code:02x}")

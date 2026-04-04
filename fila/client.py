@@ -2,138 +2,74 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
-
-import grpc
+import ssl
+from typing import TYPE_CHECKING
 
 from fila.batcher import AutoAccumulator, LingerAccumulator
+from fila.conn import Connection
 from fila.errors import (
-    MessageNotFoundError,
-    RPCError,
-    _map_ack_error,
-    _map_consume_error,
-    _map_enqueue_error,
-    _map_enqueue_result_error,
-    _map_nack_error,
+    NotLeaderError,
+    _map_per_item_error,
+    _raise_from_error_frame,
 )
-from fila.types import AccumulatorMode, ConsumeMessage, EnqueueResult, Linger
-from fila.v1 import service_pb2, service_pb2_grpc
+from fila.fibp.codec import (
+    decode_ack_result,
+    decode_create_api_key_result,
+    decode_delivery,
+    decode_enqueue_result,
+    decode_error,
+    decode_get_acl_result,
+    decode_get_config_result,
+    decode_get_stats_result,
+    decode_list_api_keys_result,
+    decode_list_config_result,
+    decode_list_queues_result,
+    decode_nack_result,
+    encode_ack,
+    encode_create_api_key,
+    encode_create_queue,
+    encode_delete_queue,
+    encode_enqueue,
+    encode_get_acl,
+    encode_get_config,
+    encode_get_stats,
+    encode_list_api_keys,
+    encode_list_config,
+    encode_list_queues,
+    encode_nack,
+    encode_redrive,
+    encode_revoke_api_key,
+    encode_set_acl,
+    encode_set_config,
+)
+from fila.fibp.opcodes import ErrorCode, Opcode
+from fila.types import (
+    AccumulatorMode,
+    AclEntry,
+    ApiKeyInfo,
+    ConsumeMessage,
+    CreateApiKeyResult,
+    EnqueueResult,
+    Linger,
+    StatsResult,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-_LEADER_HINT_KEY = "x-fila-leader-addr"
 
-
-def _extract_leader_hint(err: grpc.RpcError) -> str | None:
-    """Return the leader address from trailing metadata, if present.
-
-    The server sets ``x-fila-leader-addr`` in trailing metadata alongside an
-    UNAVAILABLE status when the node is not the leader for the requested queue.
-    """
-    if err.code() != grpc.StatusCode.UNAVAILABLE:
-        return None
-    trailing = err.trailing_metadata()
-    if trailing is None:
-        return None
-    for key, value in trailing:
-        if key == _LEADER_HINT_KEY:
-            return str(value)
-    return None
-
-
-def _proto_msg_to_consume_message(msg: Any) -> ConsumeMessage:
-    """Convert a protobuf Message to a ConsumeMessage."""
-    metadata = msg.metadata
-    return ConsumeMessage(
-        id=msg.id,
-        headers=dict(msg.headers),
-        payload=bytes(msg.payload),
-        fairness_key=metadata.fairness_key if metadata else "",
-        attempt_count=metadata.attempt_count if metadata else 0,
-        queue=metadata.queue_id if metadata else "",
-    )
-
-
-def _proto_enqueue_result_to_sdk(result: Any) -> EnqueueResult:
-    """Convert a proto EnqueueResult to the SDK type."""
-    which = result.WhichOneof("result")
-    if which == "message_id":
-        return EnqueueResult(message_id=str(result.message_id), error=None)
-    return EnqueueResult(message_id=None, error=result.error.message)
-
-
-class _ClientCallDetails(
-    grpc.ClientCallDetails,  # type: ignore[misc]
-):
-    """Concrete ``ClientCallDetails`` that can be instantiated.
-
-    ``grpc.ClientCallDetails`` is an abstract class with no ``__init__``, so we
-    need our own subclass to carry the fields through the interceptor chain.
-    """
-
-    def __init__(
-        self,
-        method: str,
-        timeout: float | None,
-        metadata: list[tuple[str, str | bytes]] | None,
-        credentials: grpc.CallCredentials | None,
-        wait_for_ready: bool | None,
-        compression: grpc.Compression | None,
-    ) -> None:
-        self.method = method
-        self.timeout = timeout
-        self.metadata = metadata
-        self.credentials = credentials
-        self.wait_for_ready = wait_for_ready
-        self.compression = compression
-
-
-class _ApiKeyInterceptor(
-    grpc.UnaryUnaryClientInterceptor,  # type: ignore[misc]
-    grpc.UnaryStreamClientInterceptor,  # type: ignore[misc]
-):
-    """Injects ``authorization: Bearer <key>`` metadata into every RPC."""
-
-    def __init__(self, api_key: str) -> None:
-        self._metadata = (("authorization", f"Bearer {api_key}"),)
-
-    def _inject(
-        self, client_call_details: grpc.ClientCallDetails
-    ) -> _ClientCallDetails:
-        metadata = list(client_call_details.metadata or [])
-        metadata.extend(self._metadata)
-        return _ClientCallDetails(
-            client_call_details.method,
-            client_call_details.timeout,
-            metadata,
-            client_call_details.credentials,
-            client_call_details.wait_for_ready,
-            client_call_details.compression,
-        )
-
-    def intercept_unary_unary(
-        self,
-        continuation: Any,
-        client_call_details: grpc.ClientCallDetails,
-        request: Any,
-    ) -> Any:
-        return continuation(self._inject(client_call_details), request)
-
-    def intercept_unary_stream(
-        self,
-        continuation: Any,
-        client_call_details: grpc.ClientCallDetails,
-        request: Any,
-    ) -> Any:
-        return continuation(self._inject(client_call_details), request)
+def _parse_addr(addr: str) -> tuple[str, int]:
+    """Parse 'host:port' into (host, port)."""
+    if ":" not in addr:
+        raise ValueError(f"invalid address (expected host:port): {addr}")
+    host, port_str = addr.rsplit(":", 1)
+    return host, int(port_str)
 
 
 class Client:
     """Synchronous client for the Fila message broker.
 
-    Wraps the hot-path gRPC operations: enqueue, enqueue_many, consume, ack,
-    nack.
+    Wraps the hot-path FIBP operations: enqueue, enqueue_many, consume, ack, nack.
 
     Usage::
 
@@ -153,7 +89,7 @@ class Client:
         # AUTO (default): opportunistic accumulation via background thread
         client = Client("localhost:5555")
 
-        # DISABLED: each enqueue() is a direct RPC
+        # DISABLED: each enqueue() is a direct request
         client = Client("localhost:5555", accumulator_mode=AccumulatorMode.DISABLED)
 
         # LINGER: timer-based forced accumulation
@@ -192,26 +128,7 @@ class Client:
         accumulator_mode: AccumulatorMode | Linger = AccumulatorMode.AUTO,
         max_accumulator_messages: int = 1000,
     ) -> None:
-        """Connect to a Fila broker at the given address.
-
-        Args:
-            addr: Broker address in "host:port" format (e.g., "localhost:5555").
-            tls: Enable TLS using the OS system trust store for server
-                 verification. Ignored when ``ca_cert`` is provided (which
-                 implies TLS). Defaults to ``False``.
-            ca_cert: PEM-encoded CA certificate for verifying the server.
-                     When provided, a TLS channel is used instead of an insecure one.
-            client_cert: PEM-encoded client certificate for mutual TLS (optional).
-            client_key: PEM-encoded client private key for mutual TLS (optional).
-            api_key: API key for authentication. When set, every RPC includes an
-                     ``authorization: Bearer <key>`` metadata header.
-            accumulator_mode: Controls how ``enqueue()`` routes messages.
-                              Defaults to ``AccumulatorMode.AUTO``
-                              (opportunistic accumulation).
-            max_accumulator_messages: Maximum number of messages per flush when
-                                     using ``AccumulatorMode.AUTO``.
-                                     Defaults to 1000.
-        """
+        self._addr = addr
         self._tls = tls
         self._ca_cert = ca_cert
         self._client_cert = client_cert
@@ -224,55 +141,81 @@ class Client:
                 "client_cert and client_key require ca_cert or tls=True to establish a TLS channel"
             )
 
-        self._channel = self._make_channel(addr)
-        self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
+        self._ssl_ctx = self._make_ssl_context() if use_tls else None
+        self._conn = self._connect(addr)
 
         # Set up the accumulator based on the chosen mode.
         self._accumulator: AutoAccumulator | LingerAccumulator | None = None
         if isinstance(accumulator_mode, Linger):
             self._accumulator = LingerAccumulator(
-                self._stub,
+                self._conn,
                 linger_ms=accumulator_mode.linger_ms,
                 max_messages=accumulator_mode.max_messages,
             )
         elif accumulator_mode is AccumulatorMode.AUTO:
             self._accumulator = AutoAccumulator(
-                self._stub,
+                self._conn,
                 max_messages=max_accumulator_messages,
             )
         # AccumulatorMode.DISABLED: self._accumulator stays None
 
-    def _make_channel(self, addr: str) -> grpc.Channel:
-        """Create a gRPC channel to the given address using stored credentials."""
-        use_tls = self._tls or self._ca_cert is not None
-
-        if use_tls:
-            creds = grpc.ssl_channel_credentials(
-                root_certificates=self._ca_cert,
-                private_key=self._client_key,
-                certificate_chain=self._client_cert,
-            )
-            channel: grpc.Channel = grpc.secure_channel(addr, creds)
+    def _make_ssl_context(self) -> ssl.SSLContext:
+        """Create an SSL context from stored credentials."""
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if self._ca_cert is not None:
+            ctx.load_verify_locations(cadata=self._ca_cert.decode("ascii"))
         else:
-            channel = grpc.insecure_channel(addr)
+            ctx.load_default_certs()
+        if self._client_cert is not None and self._client_key is not None:
+            # Write temp files for load_cert_chain (ssl module needs file paths or
+            # we can use the cadata approach for CA only).
+            import os
+            import tempfile
 
-        if self._api_key is not None:
-            interceptor = _ApiKeyInterceptor(self._api_key)
-            channel = grpc.intercept_channel(channel, interceptor)
+            cert_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
+            key_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
+            try:
+                cert_file.write(self._client_cert)
+                cert_file.close()
+                key_file.write(self._client_key)
+                key_file.close()
+                ctx.load_cert_chain(cert_file.name, key_file.name)
+            finally:
+                os.unlink(cert_file.name)
+                os.unlink(key_file.name)
+        return ctx
 
-        return channel
+    def _connect(self, addr: str) -> Connection:
+        """Open a FIBP connection to the given address."""
+        host, port = _parse_addr(addr)
+        return Connection.connect(
+            host, port, ssl_context=self._ssl_ctx, api_key=self._api_key
+        )
+
+    def _reconnect(self, addr: str) -> None:
+        """Reconnect to a different address (e.g. after leader hint)."""
+        import contextlib
+
+        with contextlib.suppress(OSError):
+            self._conn.close()
+        self._addr = addr
+        self._conn = self._connect(addr)
+        if self._accumulator is not None:
+            self._accumulator.update_conn(self._conn)
 
     def close(self) -> None:
-        """Drain pending accumulated messages and close the underlying gRPC channel."""
+        """Drain pending accumulated messages and close the underlying connection."""
         if self._accumulator is not None:
             self._accumulator.close()
-        self._channel.close()
+        self._conn.close()
 
     def __enter__(self) -> Client:
         return self
 
     def __exit__(self, *args: object) -> None:
         self.close()
+
+    # -- hot-path operations -------------------------------------------------
 
     def enqueue(
         self,
@@ -282,216 +225,286 @@ class Client:
     ) -> str:
         """Enqueue a message to the specified queue.
 
-        When an accumulator is active (``AccumulatorMode.AUTO`` or ``Linger``),
-        the message is submitted to the background accumulator and this call
-        blocks until the flush completes and the result is available.
-
-        When accumulation is disabled (``AccumulatorMode.DISABLED``), this call
-        makes a direct synchronous RPC.
-
-        Args:
-            queue: Target queue name.
-            headers: Optional message headers.
-            payload: Message payload bytes.
-
         Returns:
             Broker-assigned message ID (UUIDv7).
 
         Raises:
-            QueueNotFoundError: If the queue does not exist (DISABLED mode).
-            EnqueueError: If the enqueue RPC fails (AUTO/LINGER mode).
-            RPCError: For unexpected gRPC failures.
+            QueueNotFoundError: If the queue does not exist.
+            EnqueueError: If the enqueue fails.
         """
-        proto = service_pb2.EnqueueMessage(
-            queue=queue,
-            headers=headers or {},
-            payload=payload,
-        )
+        msg = {"queue": queue, "headers": headers or {}, "payload": payload}
 
         if self._accumulator is not None:
-            future = self._accumulator.submit(proto)
+            future = self._accumulator.submit(msg)
             return future.result()
 
-        # Direct RPC (DISABLED mode).
-        try:
-            resp = self._stub.Enqueue(
-                service_pb2.EnqueueRequest(messages=[proto])
-            )
-        except grpc.RpcError as e:
-            raise _map_enqueue_error(e) from e
-
-        result = resp.results[0]
-        which = result.WhichOneof("result")
-        if which == "message_id":
-            return str(result.message_id)
-        raise _map_enqueue_result_error(result.error.code, result.error.message)
+        return self._enqueue_direct([msg])[0]
 
     def enqueue_many(
         self,
         messages: list[tuple[str, dict[str, str] | None, bytes]],
     ) -> list[EnqueueResult]:
-        """Enqueue multiple messages in a single RPC.
-
-        This is an explicit multi-message operation that always uses the
-        Enqueue RPC directly, regardless of the accumulator_mode setting.
-
-        Args:
-            messages: List of (queue, headers, payload) tuples.
+        """Enqueue multiple messages in a single request.
 
         Returns:
             List of ``EnqueueResult`` objects, one per input message.
-            Each result has either a ``message_id`` (success) or ``error``
-            (per-message failure).
-
-        Raises:
-            QueueNotFoundError: If a referenced queue does not exist.
-            RPCError: For unexpected gRPC failures.
         """
-        proto_messages = [
-            service_pb2.EnqueueMessage(
-                queue=q,
-                headers=h or {},
-                payload=p,
-            )
+        msgs = [
+            {"queue": q, "headers": h or {}, "payload": p}
             for q, h, p in messages
         ]
+        body = encode_enqueue(msgs)
 
         try:
-            resp = self._stub.Enqueue(
-                service_pb2.EnqueueRequest(messages=proto_messages)
+            header, resp_body = self._request_with_leader_retry(
+                Opcode.ENQUEUE, body
             )
-        except grpc.RpcError as e:
-            raise _map_enqueue_error(e) from e
+        except NotLeaderError:
+            raise
 
-        return [_proto_enqueue_result_to_sdk(r) for r in resp.results]
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+
+        items = decode_enqueue_result(resp_body)
+        results: list[EnqueueResult] = []
+        for item in items:
+            if item.error_code == ErrorCode.OK:
+                results.append(EnqueueResult(message_id=item.message_id, error=None))
+            else:
+                err_msg = f"error 0x{item.error_code:02x}"
+                results.append(EnqueueResult(message_id=None, error=err_msg))
+        return results
 
     def consume(self, queue: str) -> Iterator[ConsumeMessage]:
         """Open a streaming consumer on the specified queue.
 
         Yields messages as they become available. The iterator ends when the
-        server stream closes or an error occurs. Skip nil message frames
-        (keepalive signals) automatically.
+        connection closes or an error occurs.
 
-        If the server returns UNAVAILABLE with an ``x-fila-leader-addr``
-        trailing metadata entry, the client transparently reconnects to the
-        leader address and retries the consume call once.
-
-        Args:
-            queue: Queue to consume from.
-
-        Yields:
-            ConsumeMessage objects as they arrive.
-
-        Raises:
-            QueueNotFoundError: If the queue does not exist.
-            RPCError: For unexpected gRPC failures.
+        Handles NotLeader errors by transparently reconnecting once.
         """
         try:
-            stream = self._stub.Consume(
-                service_pb2.ConsumeRequest(queue=queue)
-            )
-        except grpc.RpcError as e:
-            leader_addr = _extract_leader_hint(e)
-            if leader_addr is not None:
-                stream = self._reconnect_and_consume(leader_addr, queue)
+            _req_id, consumer_id = self._conn.subscribe(queue)
+        except NotLeaderError as e:
+            if e.leader_addr is not None:
+                self._reconnect(e.leader_addr)
+                _req_id, consumer_id = self._conn.subscribe(queue)
             else:
-                raise _map_consume_error(e) from e
+                raise
 
-        return self._consume_iter(stream)
+        return self._consume_iter(consumer_id)
 
-    def _reconnect_and_consume(self, leader_addr: str, queue: str) -> Any:
-        """Create a new channel to *leader_addr* and retry the consume call."""
-        self._channel.close()
-        self._channel = self._make_channel(leader_addr)
-        self._stub = service_pb2_grpc.FilaServiceStub(self._channel)  # type: ignore[no-untyped-call]
-        if self._accumulator is not None:
-            self._accumulator.update_stub(self._stub)
+    def _consume_iter(self, consumer_id: str) -> Iterator[ConsumeMessage]:
+        """Internal generator reading Delivery frames."""
         try:
-            return self._stub.Consume(
-                service_pb2.ConsumeRequest(queue=queue)
-            )
-        except grpc.RpcError as e:
-            raise _map_consume_error(e) from e
+            while True:
+                header, body = self._conn.read_frame()
 
-    def _consume_iter(
-        self,
-        stream: Any,
-    ) -> Iterator[ConsumeMessage]:
-        """Internal generator reading from the gRPC stream."""
-        try:
-            for resp in stream:
-                for msg in resp.messages:
-                    if msg is not None and msg.ByteSize():
-                        yield _proto_msg_to_consume_message(msg)
-        except grpc.RpcError:
+                if header.opcode == Opcode.DELIVERY:
+                    for msg in decode_delivery(body):
+                        yield ConsumeMessage(
+                            id=msg.message_id,
+                            queue=msg.queue,
+                            headers=msg.headers,
+                            payload=msg.payload,
+                            fairness_key=msg.fairness_key,
+                            attempt_count=msg.attempt_count,
+                            weight=msg.weight,
+                            throttle_keys=msg.throttle_keys,
+                            enqueued_at=msg.enqueued_at,
+                            leased_at=msg.leased_at,
+                        )
+                elif header.opcode == Opcode.ERROR:
+                    err = decode_error(body)
+                    _raise_from_error_frame(err)
+                # Ignore other frames (e.g. pong is handled in read_frame).
+        except (ConnectionError, OSError):
             return
 
     def ack(self, queue: str, msg_id: str) -> None:
-        """Acknowledge a successfully processed message.
+        """Acknowledge a successfully processed message."""
+        body = encode_ack([{"queue": queue, "message_id": msg_id}])
+        header, resp_body = self._request_with_leader_retry(Opcode.ACK, body)
 
-        The message is permanently removed from the queue.
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
 
-        Args:
-            queue: Queue the message belongs to.
-            msg_id: ID of the message to acknowledge.
-
-        Raises:
-            MessageNotFoundError: If the message does not exist.
-            RPCError: For unexpected gRPC failures.
-        """
-        try:
-            resp = self._stub.Ack(
-                service_pb2.AckRequest(
-                    messages=[service_pb2.AckMessage(queue=queue, message_id=msg_id)]
-                )
-            )
-        except grpc.RpcError as e:
-            raise _map_ack_error(e) from e
-
-        # Check per-message result for errors.
-        if resp.results:
-            result = resp.results[0]
-            which = result.WhichOneof("result")
-            if which == "error":
-                ack_err = result.error
-                if ack_err.code == service_pb2.ACK_ERROR_CODE_MESSAGE_NOT_FOUND:
-                    raise MessageNotFoundError(f"ack: {ack_err.message}")
-                raise RPCError(grpc.StatusCode.INTERNAL, f"ack: {ack_err.message}")
+        codes = decode_ack_result(resp_body)
+        if codes and codes[0] != ErrorCode.OK:
+            raise _map_per_item_error(codes[0], "ack")
 
     def nack(self, queue: str, msg_id: str, error: str) -> None:
-        """Negatively acknowledge a message that failed processing.
+        """Negatively acknowledge a message that failed processing."""
+        body = encode_nack([{"queue": queue, "message_id": msg_id, "error": error}])
+        header, resp_body = self._request_with_leader_retry(Opcode.NACK, body)
 
-        The message is requeued for retry or routed to the dead-letter queue
-        based on the queue's on_failure Lua hook configuration.
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
 
-        Args:
-            queue: Queue the message belongs to.
-            msg_id: ID of the message to nack.
-            error: Description of the failure.
+        codes = decode_nack_result(resp_body)
+        if codes and codes[0] != ErrorCode.OK:
+            raise _map_per_item_error(codes[0], "nack")
 
-        Raises:
-            MessageNotFoundError: If the message does not exist.
-            RPCError: For unexpected gRPC failures.
-        """
-        try:
-            resp = self._stub.Nack(
-                service_pb2.NackRequest(
-                    messages=[
-                        service_pb2.NackMessage(
-                            queue=queue, message_id=msg_id, error=error
-                        )
-                    ]
-                )
-            )
-        except grpc.RpcError as e:
-            raise _map_nack_error(e) from e
+    # -- admin operations ----------------------------------------------------
 
-        # Check per-message result for errors.
-        if resp.results:
-            result = resp.results[0]
-            which = result.WhichOneof("result")
-            if which == "error":
-                nack_err = result.error
-                if nack_err.code == service_pb2.NACK_ERROR_CODE_MESSAGE_NOT_FOUND:
-                    raise MessageNotFoundError(f"nack: {nack_err.message}")
-                raise RPCError(grpc.StatusCode.INTERNAL, f"nack: {nack_err.message}")
+    def create_queue(self, name: str, config: dict[str, str] | None = None) -> None:
+        """Create a queue on the broker."""
+        body = encode_create_queue(name, config)
+        header, resp_body = self._request_with_leader_retry(Opcode.CREATE_QUEUE, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+
+    def delete_queue(self, name: str) -> None:
+        """Delete a queue from the broker."""
+        body = encode_delete_queue(name)
+        header, resp_body = self._request_with_leader_retry(Opcode.DELETE_QUEUE, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+
+    def get_stats(self, queue: str) -> StatsResult:
+        """Get statistics for a queue."""
+        body = encode_get_stats(queue)
+        header, resp_body = self._request_with_leader_retry(Opcode.GET_STATS, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+        result = decode_get_stats_result(resp_body)
+        return StatsResult(stats=result.stats)
+
+    def list_queues(self) -> list[str]:
+        """List all queues on the broker."""
+        body = encode_list_queues()
+        header, resp_body = self._request_with_leader_retry(Opcode.LIST_QUEUES, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+        return decode_list_queues_result(resp_body)
+
+    def set_config(self, queue: str, config: dict[str, str]) -> None:
+        """Set configuration for a queue."""
+        body = encode_set_config(queue, config)
+        header, resp_body = self._request_with_leader_retry(Opcode.SET_CONFIG, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+
+    def get_config(self, queue: str) -> dict[str, str]:
+        """Get configuration for a queue."""
+        body = encode_get_config(queue)
+        header, resp_body = self._request_with_leader_retry(Opcode.GET_CONFIG, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+        return decode_get_config_result(resp_body)
+
+    def list_config(self, queue: str) -> dict[str, str]:
+        """List all configuration for a queue."""
+        body = encode_list_config(queue)
+        header, resp_body = self._request_with_leader_retry(Opcode.LIST_CONFIG, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+        return decode_list_config_result(resp_body)
+
+    def redrive(self, source_queue: str, dest_queue: str, count: int) -> None:
+        """Redrive messages from one queue to another."""
+        body = encode_redrive(source_queue, dest_queue, count)
+        header, resp_body = self._request_with_leader_retry(Opcode.REDRIVE, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+
+    # -- auth operations -----------------------------------------------------
+
+    def create_api_key(self, name: str) -> CreateApiKeyResult:
+        """Create a new API key."""
+        body = encode_create_api_key(name)
+        header, resp_body = self._request_with_leader_retry(Opcode.CREATE_API_KEY, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+        key_id, raw_key = decode_create_api_key_result(resp_body)
+        return CreateApiKeyResult(key_id=key_id, raw_key=raw_key)
+
+    def revoke_api_key(self, key_id: str) -> None:
+        """Revoke an API key."""
+        body = encode_revoke_api_key(key_id)
+        header, resp_body = self._request_with_leader_retry(Opcode.REVOKE_API_KEY, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+
+    def list_api_keys(self) -> list[ApiKeyInfo]:
+        """List all API keys."""
+        body = encode_list_api_keys()
+        header, resp_body = self._request_with_leader_retry(Opcode.LIST_API_KEYS, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+        items = decode_list_api_keys_result(resp_body)
+        return [
+            ApiKeyInfo(key_id=k.key_id, prefix=k.prefix, created_at=k.created_at)
+            for k in items
+        ]
+
+    def set_acl(self, key_id: str, patterns: list[str], superadmin: bool = False) -> None:
+        """Set ACL for an API key."""
+        body = encode_set_acl(key_id, patterns, superadmin)
+        header, resp_body = self._request_with_leader_retry(Opcode.SET_ACL, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+
+    def get_acl(self, key_id: str) -> AclEntry:
+        """Get ACL for an API key."""
+        body = encode_get_acl(key_id)
+        header, resp_body = self._request_with_leader_retry(Opcode.GET_ACL, body)
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+        result = decode_get_acl_result(resp_body)
+        return AclEntry(patterns=result.patterns, superadmin=result.superadmin)
+
+    # -- internal helpers ----------------------------------------------------
+
+    def _enqueue_direct(self, messages: list[dict[str, object]]) -> list[str]:
+        """Send an enqueue request directly and return message IDs."""
+        body = encode_enqueue(messages)
+
+        header, resp_body = self._request_with_leader_retry(Opcode.ENQUEUE, body)
+
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            _raise_from_error_frame(err)
+
+        items = decode_enqueue_result(resp_body)
+        results: list[str] = []
+        for item in items:
+            if item.error_code == ErrorCode.OK:
+                results.append(item.message_id)
+            else:
+                raise _map_per_item_error(item.error_code, "enqueue")
+        return results
+
+    def _request_with_leader_retry(
+        self, opcode: int, body: bytes
+    ) -> tuple[object, bytes]:
+        """Send a request, retrying once on NotLeader with leader hint."""
+
+        header, resp_body = self._conn.request(opcode, body)
+
+        # Check for NotLeader error with leader hint.
+        if header.opcode == Opcode.ERROR:
+            err = decode_error(resp_body)
+            if err.code == ErrorCode.NOT_LEADER:
+                leader_addr = err.metadata.get("leader_addr")
+                if leader_addr:
+                    self._reconnect(leader_addr)
+                    return self._conn.request(opcode, body)
+
+        return header, resp_body

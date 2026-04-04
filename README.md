@@ -2,6 +2,8 @@
 
 Python client SDK for the [Fila](https://github.com/faiscadev/fila) message broker.
 
+Communicates with the Fila server over the FIBP (Fila Binary Protocol) on port 5555.
+
 ## Installation
 
 ```bash
@@ -102,7 +104,7 @@ client = Client(
 )
 ```
 
-The API key is sent as `authorization: Bearer <key>` metadata on every RPC.
+The API key is sent during the FIBP handshake.
 
 ## API
 
@@ -113,6 +115,10 @@ Connect to a Fila broker. Both support context manager protocol.
 ### `client.enqueue(queue, headers, payload) -> str`
 
 Enqueue a message. Returns the broker-assigned message ID.
+
+### `client.enqueue_many(messages) -> list[EnqueueResult]`
+
+Enqueue multiple messages in a single request. Returns per-message results.
 
 ### `client.consume(queue) -> Iterator[ConsumeMessage]`
 
@@ -126,12 +132,31 @@ Acknowledge a successfully processed message. The message is permanently removed
 
 Negatively acknowledge a failed message. The message is requeued or routed to the dead-letter queue based on the queue's configuration.
 
+### Admin Methods
+
+- `client.create_queue(name, config=None)` -- Create a queue
+- `client.delete_queue(name)` -- Delete a queue
+- `client.get_stats(queue) -> StatsResult` -- Get queue statistics
+- `client.list_queues() -> list[str]` -- List all queues
+- `client.set_config(queue, config)` -- Set queue configuration
+- `client.get_config(queue) -> dict` -- Get queue configuration
+- `client.list_config(queue) -> dict` -- List queue configuration
+- `client.redrive(source, dest, count)` -- Redrive messages between queues
+
+### Auth Methods
+
+- `client.create_api_key(name) -> CreateApiKeyResult` -- Create an API key
+- `client.revoke_api_key(key_id)` -- Revoke an API key
+- `client.list_api_keys() -> list[ApiKeyInfo]` -- List API keys
+- `client.set_acl(key_id, patterns, superadmin=False)` -- Set ACL
+- `client.get_acl(key_id) -> AclEntry` -- Get ACL
+
 ## Error Handling
 
 Per-operation exception classes:
 
 ```python
-from fila import QueueNotFoundError, MessageNotFoundError
+from fila import QueueNotFoundError, MessageNotFoundError, UnauthorizedError
 
 try:
     client.enqueue("missing-queue", None, b"test")

@@ -16,6 +16,10 @@ class ConsumeMessage:
     fairness_key: str
     attempt_count: int
     queue: str
+    weight: int = 0
+    throttle_keys: list[str] | None = None
+    enqueued_at: int = 0
+    leased_at: int = 0
 
 
 @dataclass(frozen=True)
@@ -61,3 +65,35 @@ class Linger:
 
     linger_ms: float
     max_messages: int
+
+
+@dataclass(frozen=True)
+class CreateApiKeyResult:
+    """Result of creating an API key."""
+
+    key_id: str
+    raw_key: str
+
+
+@dataclass(frozen=True)
+class ApiKeyInfo:
+    """Summary information about an API key."""
+
+    key_id: str
+    prefix: str
+    created_at: int
+
+
+@dataclass(frozen=True)
+class AclEntry:
+    """ACL entry for an API key."""
+
+    patterns: list[str]
+    superadmin: bool
+
+
+@dataclass(frozen=True)
+class StatsResult:
+    """Queue statistics."""
+
+    stats: dict[str, str]
