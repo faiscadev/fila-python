@@ -232,7 +232,9 @@ class Client:
         payload: bytes,
     ) -> str:
         """Enqueue a message. Returns the broker-assigned message ID."""
-        msg = {"queue": queue, "headers": headers or {}, "payload": payload}
+        msg: dict[str, object] = {
+            "queue": queue, "headers": headers or {}, "payload": payload,
+        }
 
         if self._accumulator is not None:
             future = self._accumulator.submit(msg)
@@ -245,7 +247,7 @@ class Client:
         messages: list[tuple[str, dict[str, str] | None, bytes]],
     ) -> list[EnqueueResult]:
         """Enqueue multiple messages in a single request."""
-        msgs = [
+        msgs: list[dict[str, object]] = [
             {"queue": q, "headers": h or {}, "payload": p}
             for q, h, p in messages
         ]
@@ -285,7 +287,17 @@ class Client:
                 header, body = self._conn.read_frame()
 
                 if header.opcode == Opcode.DELIVERY:
-                    for msg in decode_delivery(body):
+                    try:
+                        messages = decode_delivery(body)
+                    except Exception as exc:
+                        raise ConnectionError(
+                            f"failed to decode delivery frame "
+                            f"(opcode=0x{header.opcode:02x}, "
+                            f"flags=0x{header.flags:02x}, "
+                            f"body_len={len(body)}, "
+                            f"body_hex={body[:64].hex()}): {exc}"
+                        ) from exc
+                    for msg in messages:
                         yield ConsumeMessage(
                             id=msg.message_id,
                             queue=msg.queue,

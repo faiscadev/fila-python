@@ -165,7 +165,9 @@ class AsyncClient:
     ) -> str:
         """Enqueue a message. Returns the broker-assigned message ID."""
         await self._ensure_connected()
-        msgs = [{"queue": queue, "headers": headers or {}, "payload": payload}]
+        msgs: list[dict[str, object]] = [
+            {"queue": queue, "headers": headers or {}, "payload": payload},
+        ]
         body = encode_enqueue(msgs)
 
         header, resp_body = await self._request_with_leader_retry(
@@ -187,7 +189,7 @@ class AsyncClient:
     ) -> list[EnqueueResult]:
         """Enqueue multiple messages in a single request."""
         await self._ensure_connected()
-        msgs = [
+        msgs: list[dict[str, object]] = [
             {"queue": q, "headers": h or {}, "payload": p}
             for q, h, p in messages
         ]
