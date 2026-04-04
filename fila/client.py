@@ -284,7 +284,10 @@ class Client:
     def _consume_iter(self, consumer_id: str) -> Iterator[ConsumeMessage]:
         try:
             while True:
-                header, body = self._conn.read_frame()
+                try:
+                    header, body = self._conn.read_frame()
+                except (ConnectionError, OSError):
+                    return
 
                 if header.opcode == Opcode.DELIVERY:
                     for msg in decode_delivery(body):
@@ -303,8 +306,10 @@ class Client:
                 elif header.opcode == Opcode.ERROR:
                     err = decode_error(body)
                     _raise_from_error_frame(err)
-        except (ConnectionError, OSError):
-            return
+        finally:
+            import contextlib
+            with contextlib.suppress(OSError):
+                self._conn.cancel_consume(consumer_id)
 
     def ack(self, queue: str, msg_id: str) -> None:
         """Acknowledge a successfully processed message."""

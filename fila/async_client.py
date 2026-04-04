@@ -232,7 +232,10 @@ class AsyncClient:
     ) -> AsyncIterator[ConsumeMessage]:
         try:
             while True:
-                header, body = await conn.read_frame()
+                try:
+                    header, body = await conn.read_frame()
+                except (ConnectionError, OSError):
+                    return
 
                 if header.opcode == Opcode.DELIVERY:
                     for msg in decode_delivery(body):
@@ -251,8 +254,10 @@ class AsyncClient:
                 elif header.opcode == Opcode.ERROR:
                     err = decode_error(body)
                     _raise_from_error_frame(err)
-        except (ConnectionError, OSError):
-            return
+        finally:
+            import contextlib
+            with contextlib.suppress(OSError):
+                await conn.cancel_consume(consumer_id)
 
     async def ack(self, queue: str, msg_id: str) -> None:
         body = encode_ack([{"queue": queue, "message_id": msg_id}])
