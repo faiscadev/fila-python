@@ -136,6 +136,11 @@ class Reader:
     def read_string(self) -> str:
         length = self.read_u16()
         end = self._pos + length
+        if end > len(self._data):
+            raise ValueError(
+                f"string length {length} exceeds remaining buffer "
+                f"({len(self._data) - self._pos} bytes at offset {self._pos})"
+            )
         s = self._data[self._pos:end].decode("utf-8")
         self._pos = end
         return s
@@ -143,6 +148,11 @@ class Reader:
     def read_bytes(self) -> bytes:
         length = self.read_u32()
         end = self._pos + length
+        if end > len(self._data):
+            raise ValueError(
+                f"bytes length {length} exceeds remaining buffer "
+                f"({len(self._data) - self._pos} bytes at offset {self._pos})"
+            )
         b = self._data[self._pos:end]
         self._pos = end
         return b

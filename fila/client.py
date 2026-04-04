@@ -287,17 +287,7 @@ class Client:
                 header, body = self._conn.read_frame()
 
                 if header.opcode == Opcode.DELIVERY:
-                    try:
-                        messages = decode_delivery(body)
-                    except Exception as exc:
-                        raise ConnectionError(
-                            f"failed to decode delivery frame "
-                            f"(opcode=0x{header.opcode:02x}, "
-                            f"flags=0x{header.flags:02x}, "
-                            f"body_len={len(body)}, "
-                            f"body_hex={body[:64].hex()}): {exc}"
-                        ) from exc
-                    for msg in messages:
+                    for msg in decode_delivery(body):
                         yield ConsumeMessage(
                             id=msg.message_id,
                             queue=msg.queue,

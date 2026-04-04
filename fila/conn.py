@@ -189,10 +189,17 @@ class Connection:
             consumer_id = decode_consume_ok(body)
             return req_id, consumer_id
 
-        # Server may send Delivery directly (older binaries without ConsumeOk).
-        # Push the frame back so the consume iterator can read it.
-        self._pushback = (header, body)
-        return req_id, ""
+        if header.opcode == Opcode.DELIVERY:
+            # Server may send Delivery directly (older binaries without ConsumeOk).
+            # Push the frame back so the consume iterator can read it.
+            self._pushback = (header, body)
+            return req_id, ""
+
+        raise ConnectionError(
+            f"expected ConsumeOk (0x{Opcode.CONSUME_OK:02x}) or "
+            f"Delivery (0x{Opcode.DELIVERY:02x}), "
+            f"got 0x{header.opcode:02x}"
+        )
 
     def cancel_consume(self, consumer_id: str) -> None:
         """Send a CancelConsume frame."""
@@ -368,9 +375,16 @@ class AsyncConnection:
             consumer_id = decode_consume_ok(body)
             return req_id, consumer_id
 
-        # Server may send Delivery directly (older binaries without ConsumeOk).
-        self._pushback = (header, body)
-        return req_id, ""
+        if header.opcode == Opcode.DELIVERY:
+            # Server may send Delivery directly (older binaries without ConsumeOk).
+            self._pushback = (header, body)
+            return req_id, ""
+
+        raise ConnectionError(
+            f"expected ConsumeOk (0x{Opcode.CONSUME_OK:02x}) or "
+            f"Delivery (0x{Opcode.DELIVERY:02x}), "
+            f"got 0x{header.opcode:02x}"
+        )
 
     async def cancel_consume(self, consumer_id: str) -> None:
         """Send a CancelConsume frame."""

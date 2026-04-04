@@ -103,6 +103,12 @@ def _flush_many(
                 _map_per_item_error(result.error_code, "enqueue")
             )
 
+    # If the server returned fewer results than items sent, fail the rest.
+    for i in range(len(results), len(items)):
+        items[i].future.set_exception(
+            EnqueueError("server returned fewer results than messages sent")
+        )
+
 
 class AutoAccumulator:
     """Opportunistic accumulator: drains a queue and flushes in batches.
